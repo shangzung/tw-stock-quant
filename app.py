@@ -10,7 +10,9 @@
 
 import time
 import math
+import json
 import threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -23,6 +25,93 @@ import plotly.graph_objects as go
 import ta
 import yfinance as yf
 from FinMind.data import DataLoader
+
+# =========================
+# -1. 本機持久化：Token / 掃描結果 / 庫存清單
+#     全部存在 app.py 同一層的 .quant_compass_cache 資料夾，純本機檔案，
+#     不會上傳到任何地方；換電腦或砍掉這個資料夾就等於全部重來。
+# =========================
+try:
+    APP_DIR = Path(__file__).resolve().parent
+except NameError:
+    APP_DIR = Path.cwd()
+CACHE_DIR = APP_DIR / ".quant_compass_cache"
+CACHE_DIR.mkdir(exist_ok=True)
+TOKEN_FILE = CACHE_DIR / "finmind_token.json"
+SCAN_CACHE_FILE = CACHE_DIR / "last_scan.pkl"
+HOLDINGS_FILE = CACHE_DIR / "holdings.json"
+
+
+def load_saved_token():
+    try:
+        if TOKEN_FILE.exists():
+            return json.loads(TOKEN_FILE.read_text(encoding="utf-8")).get("token", "")
+    except Exception:
+        pass
+    return ""
+
+
+def save_token_to_disk(token):
+    try:
+        TOKEN_FILE.write_text(json.dumps({"token": token}, ensure_ascii=False), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def clear_saved_token():
+    try:
+        if TOKEN_FILE.exists():
+            TOKEN_FILE.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def load_saved_scan():
+    """開啟 App 時，把上次留下來的掃描結果讀回來，直到下一次按『開始今日掃描』才會被覆蓋掉。"""
+    try:
+        if SCAN_CACHE_FILE.exists():
+            return pd.read_pickle(SCAN_CACHE_FILE)
+    except Exception:
+        pass
+    return None
+
+
+def save_scan_to_disk(payload: dict):
+    try:
+        pd.to_pickle(payload, SCAN_CACHE_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def clear_saved_scan():
+    try:
+        if SCAN_CACHE_FILE.exists():
+            SCAN_CACHE_FILE.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def load_saved_holdings():
+    try:
+        if HOLDINGS_FILE.exists():
+            data = json.loads(HOLDINGS_FILE.read_text(encoding="utf-8"))
+            if data:
+                return pd.DataFrame(data)
+    except Exception:
+        pass
+    return pd.DataFrame({"股票代碼": [], "持有股數": [], "持有成本": []})
+
+
+def save_holdings_to_disk(df):
+    try:
+        HOLDINGS_FILE.write_text(df.to_json(orient="records", force_ascii=False), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 # =========================
 # 0. Streamlit & Mac CSS & 狀態初始化
@@ -38,6 +127,15 @@ st.set_page_config(
 if "market_scan_out" not in st.session_state: st.session_state["market_scan_out"] = None
 if "market_scan_candidates" not in st.session_state: st.session_state["market_scan_candidates"] = None
 if "market_scan_top5" not in st.session_state: st.session_state["market_scan_top5"] = None
+if "market_scan_saved_at" not in st.session_state: st.session_state["market_scan_saved_at"] = None
+if st.session_state["market_scan_out"] is None:
+    # App 重開後，先把上次留下的掃描結果讀回來，直到下一次按下「開始今日掃描」才會被洗掉。
+    _saved_scan = load_saved_scan()
+    if _saved_scan:
+        st.session_state["market_scan_out"] = _saved_scan.get("out")
+        st.session_state["market_scan_candidates"] = _saved_scan.get("candidates")
+        st.session_state["market_scan_top5"] = _saved_scan.get("top5")
+        st.session_state["market_scan_saved_at"] = _saved_scan.get("saved_at")
 if "year_sim_res" not in st.session_state: st.session_state["year_sim_res"] = None
 if "week_sim_res" not in st.session_state: st.session_state["week_sim_res"] = None
 if "candidate_out" not in st.session_state: st.session_state["candidate_out"] = None
@@ -48,6 +146,13 @@ if "wf_res" not in st.session_state: st.session_state["wf_res"] = None
 if "stock_lookup_res" not in st.session_state: st.session_state["stock_lookup_res"] = None
 if "watchlist_editor" not in st.session_state:
     st.session_state["watchlist_editor"] = pd.DataFrame({"股票代碼": ["2330", "5351", "3481", "2317", "2454"]})
+if "token_applied" not in st.session_state:
+    # App 重開後，先把上次儲存的 Token 讀回來，不用每次都重新輸入。
+    st.session_state["token_applied"] = load_saved_token()
+if "holdings_editor" not in st.session_state:
+    st.session_state["holdings_editor"] = load_saved_holdings()
+if "holdings_health_res" not in st.session_state:
+    st.session_state["holdings_health_res"] = None
 
 # Mac 風格與手機端最佳化 CSS
 st.markdown("""
@@ -283,6 +388,19 @@ st.markdown("""
     .pick-card:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(0,0,0,0.28); }
 
     hr, [data-testid="stDivider"] { border-color: var(--border-c) !important; opacity: 0.6; }
+
+    /* ── 隱藏 Streamlit 自帶的工具列 / Deploy 按鈕 / Fork·GitHub 按鈕 / 頁尾浮水印 ──
+       這些不是我們畫面的一部分，全部藏起來，讓畫面乾淨、只有這個 App 本身的內容。 */
+    #MainMenu { visibility: hidden !important; }
+    header[data-testid="stHeader"] { visibility: hidden !important; height: 0 !important; }
+    footer { visibility: hidden !important; height: 0 !important; }
+    [data-testid="stToolbar"] { visibility: hidden !important; height: 0 !important; }
+    [data-testid="stDecoration"] { display: none !important; }
+    [data-testid="stStatusWidget"] { visibility: hidden !important; }
+    .stDeployButton { display: none !important; }
+    div[class^="viewerBadge"], div[class*=" viewerBadge"] { display: none !important; }
+    iframe[title*="viewer_badge"], iframe[title*="Streamlit"] { display: none !important; }
+    a[href*="streamlit.io"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -312,9 +430,6 @@ api = DataLoader()
 
 # Token／API 設定的輸入元件移到「⚙️ 系統設定」分頁（見下方 render_settings_tab），
 # 這裡只用 session_state 裡已套用的值做登入，讓一般使用者不必在主畫面看到這些研究員參數。
-if "token_applied" not in st.session_state:
-    st.session_state["token_applied"] = ""
-
 active_token = st.session_state["token_applied"]
 
 if active_token:
@@ -1221,6 +1336,75 @@ def calculate_stock_at(stock_id, regime_tag, regime_dict, as_of_idx=None, as_of_
 def calculate_stock(stock_id, regime_tag, regime_dict):
     return calculate_stock_at(stock_id, regime_tag, regime_dict)
 
+
+# =========================
+# 6.5 庫存健康檢查：把「現在該怎麼辦」變成一個可以直接照做的建議
+#     沿用跟「今日選股」完全相同的評分引擎（calculate_stock），
+#     再結合你自己輸入的持有成本，換算成停損／加碼／攤平／出清的操作建議。
+# =========================
+def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_profit_pct=None):
+    """回傳這一檔庫存的健康檢查結果：操作建議、理由、參考停損價。
+    這是規則式的參考建議，不是投資建議，最終判斷仍要自己做。
+    """
+    price = safe_float(stock_row.get("現價"))
+    atr = safe_float(stock_row.get("ATR"))
+    buy_score = safe_float(stock_row.get("買進分"), 0)
+    decision = stock_row.get("決策", "") or ""
+    status = stock_row.get("狀態", "") or ""
+    risk = stock_row.get("風險", "") or ""
+    rsi = safe_float(stock_row.get("RSI"), 50)
+
+    cost = safe_float(cost)
+    pnl_pct = (price / cost - 1) * 100 if cost > 0 and not pd.isna(price) else np.nan
+    market_value = price * shares if not pd.isna(price) else np.nan
+    unrealized_pnl = (price - cost) * shares if (not pd.isna(price) and cost > 0) else np.nan
+
+    atr_stop = price - 2 * atr if (not pd.isna(price) and not pd.isna(atr) and atr > 0) else np.nan
+    hard_stop = cost * (1 - stop_loss_pct / 100) if cost > 0 else np.nan
+    suggested_stop = np.nanmax([v for v in [atr_stop, hard_stop] if not pd.isna(v)]) if any(
+        not pd.isna(v) for v in [atr_stop, hard_stop]) else np.nan
+
+    trend_broken = "🔴" in status
+    tech_weak = "🔴" in decision
+    overheated = "🟠" in status or rsi >= 80
+
+    reasons = []
+    if pd.isna(price):
+        action = "⚠️ 資料不足"
+        reasons.append("目前抓不到有效股價，稍後再檢查一次，或到「⚙️ 系統設定」看 API 診斷。")
+    elif not pd.isna(pnl_pct) and pnl_pct <= -stop_loss_pct:
+        action = "🔻 建議停損"
+        reasons.append(f"未實現損益已達 {pnl_pct:.1f}%，跌破你設定的停損線 -{stop_loss_pct:.0f}%。")
+        reasons.append("紀律優先：先出場保住本金，之後條件轉強再重新評估進場，比留在場上『賭它彈回來』更划算。")
+    elif trend_broken and tech_weak:
+        action = "🚪 建議出清"
+        reasons.append("股價已跌破 MA20，且綜合決策已轉為「不買」等級，趨勢轉弱訊號明確。")
+        if not pd.isna(pnl_pct):
+            reasons.append(f"目前未實現損益 {pnl_pct:+.1f}%，技術面已不支持續抱。")
+    elif take_profit_pct and not pd.isna(pnl_pct) and pnl_pct >= take_profit_pct and overheated:
+        action = "🎯 可考慮部分獲利了結"
+        reasons.append(f"獲利已達 {pnl_pct:.1f}%，且短線偏過熱（{status}），可考慮先落袋一部分、剩餘部位設移動停利。")
+    elif not pd.isna(pnl_pct) and pnl_pct < 0 and buy_score >= 60 and risk != "🔴 高" and not trend_broken:
+        action = "➕ 可考慮攤平"
+        reasons.append(f"目前未實現損益 {pnl_pct:.1f}%，但基本面／技術面條件仍偏正向（買進分 {buy_score:.0f}），且尚未跌破均線。")
+        reasons.append("攤平前務必先設好新的停損價，一旦再次跌破就出場，避免越攤越薄。")
+    elif not pd.isna(pnl_pct) and pnl_pct >= 0 and "🟢" in decision and risk != "🔴 高" and not overheated:
+        action = "📈 可考慮加碼"
+        reasons.append(f"目前獲利 {pnl_pct:.1f}%，趨勢與買進條件持續偏多，且沒有短線過熱訊號。")
+    else:
+        action = "🤝 續抱觀察"
+        reasons.append("目前條件中性，沒有出現明確的加碼或減碼訊號，維持原部位即可。")
+
+    return {
+        "現價": price, "損益%": round(pnl_pct, 2) if not pd.isna(pnl_pct) else np.nan,
+        "市值": round(market_value, 0) if not pd.isna(market_value) else np.nan,
+        "未實現損益": round(unrealized_pnl, 0) if not pd.isna(unrealized_pnl) else np.nan,
+        "建議停損價": round(suggested_stop, 2) if not pd.isna(suggested_stop) else np.nan,
+        "買進分": buy_score, "決策": decision, "狀態": status, "風險": risk,
+        "操作建議": action, "理由": reasons,
+    }
+
+
 # =========================
 # 7. 回測引擎：統一買進分 + 真實成本 + 完整績效
 # =========================
@@ -1388,16 +1572,38 @@ def render_settings_tab():
     """把 Token / API 診斷 / 回測費率／投組持股數 全部集中在這一個分頁，
     一般使用者完全不需要打開就能用『今日選股』。"""
     st.subheader("🔑 FinMind Token")
-    user_token_input = st.text_input("輸入 FinMind Token (選填)", type="password")
-    c1, c2 = st.columns(2)
+    st.caption("免費註冊 FinMind 帳號即可取得 Token，額度會從 300 次/hr 提高到 600 次/hr。輸入後按下方按鈕套用並儲存到本機，下次開啟 App 會自動帶入，不用重新輸入。")
+    st.markdown("🔗 [前往 FinMind 官網免費註冊 / 索取 Token](https://finmindtrade.com/analysis/#/data/api_token)")
+    user_token_input = st.text_input(
+        "輸入 FinMind Token (選填)",
+        value=st.session_state.get("token_applied", ""),
+        type="password",
+    )
+    c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("✔️ 確認 Token / 套用"):
-            st.session_state["token_applied"] = user_token_input.strip()
+        if st.button("✔️ 確認 Token / 套用並儲存"):
+            _clean = user_token_input.strip()
+            st.session_state["token_applied"] = _clean
+            if _clean:
+                save_token_to_disk(_clean)
+                st.success("Token 已套用並儲存到本機，下次開啟 App 會自動帶入。")
+            else:
+                clear_saved_token()
             st.rerun()
     with c2:
+        if st.button("🗑️ 清除已儲存 Token"):
+            st.session_state["token_applied"] = ""
+            clear_saved_token()
+            st.success("已清除本機儲存的 Token。")
+            st.rerun()
+    with c3:
         if st.button("🧹 清除快取"):
             st.cache_data.clear()
             st.session_state["market_scan_out"] = None
+            st.session_state["market_scan_candidates"] = None
+            st.session_state["market_scan_top5"] = None
+            st.session_state["market_scan_saved_at"] = None
+            clear_saved_scan()
             st.success("快取已清除，下次抓取會拿最新資料")
     _kind, _msg = _token_status
     getattr(st, _kind)(_msg)
@@ -1467,8 +1673,8 @@ def render_settings_tab():
 # =========================
 # 9. Tabs 顯示區（8 個分頁收斂成 4 個：今日選股 / 股票分析 / 歷史驗證 / 系統設定）
 # =========================
-tab_today, tab_stock, tab_verify, tab_settings = st.tabs([
-    "🔥 今日選股", "🔍 股票分析", "📜 歷史驗證", "⚙️ 系統設定"
+tab_today, tab_stock, tab_holdings, tab_verify, tab_settings = st.tabs([
+    "🔥 今日選股", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "⚙️ 系統設定"
 ])
 
 # --- TAB：系統設定（程式碼故意寫在最前面執行，讓改設定當下就對其他分頁生效，
@@ -1656,10 +1862,17 @@ with tab_today:
                         name_map = universe_df.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in universe_df.columns else {}
                         out.insert(1, "名稱", out["股票代碼"].map(name_map).fillna(""))
                         candidates = out[out["決策"].isin(["🟢 可買"])]
-    
+                        _saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                         st.session_state["market_scan_out"] = out
                         st.session_state["market_scan_candidates"] = candidates
                         st.session_state["market_scan_top5"] = out.head(5)
+                        st.session_state["market_scan_saved_at"] = _saved_at
+                        # 存到本機檔案：就算關掉 App 或重開機，這份結果也會留著，
+                        # 直到你下一次按「開始今日掃描」才會被覆蓋掉。
+                        save_scan_to_disk({
+                            "out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at
+                        })
                     else:
                         st.error("完整分析階段沒有取得有效資料。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
                 else:
@@ -1668,6 +1881,9 @@ with tab_today:
         if st.session_state.get("market_scan_out") is not None:
             out_df = st.session_state["market_scan_out"]
             top5_df = st.session_state.get("market_scan_top5")
+            _saved_at = st.session_state.get("market_scan_saved_at")
+            if _saved_at:
+                st.caption(f"🕓 目前顯示的是 {_saved_at} 的掃描結果（重開 App 也不會消失，按「開始今日掃描」才會更新）。")
 
             if top5_df is not None and not top5_df.empty:
                 st.subheader("🔥 今日最值得看")
@@ -1755,7 +1971,102 @@ with tab_stock:
             if cands.empty: st.info("目前自選股中沒有同時通過所有買進條件的標的。")
             else: show_scan_dataframe(cands)
 
-# --- TAB：歷史驗證 ---
+# --- TAB：庫存健康 ---
+with tab_holdings:
+    st.subheader("🩺 庫存健康檢查")
+    st.caption("輸入你實際持有的股票、股數與成本，一鍵檢查每一檔現在該停損、加碼、攤平還是出清。這份清單會存在本機，下次開啟自動帶回來。")
+
+    holdings_df = st.data_editor(
+        st.session_state["holdings_editor"],
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "股票代碼": st.column_config.TextColumn("股票代碼", help="輸入 4 碼台股代號", max_chars=4),
+            "持有股數": st.column_config.NumberColumn("持有股數", min_value=0, step=1000),
+            "持有成本": st.column_config.NumberColumn("持有成本（每股）", min_value=0.0, step=0.1, format="%.2f"),
+        },
+        key="holdings_editor_widget",
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        stop_loss_pct = st.slider("停損門檻（%）", min_value=3, max_value=20, value=8,
+                                   help="未實現損益跌破這個百分比，就會被標記為「建議停損」。")
+    with c2:
+        take_profit_pct = st.slider("獲利了結參考線（%）", min_value=0, max_value=100, value=30,
+                                     help="搭配短線過熱訊號一起看，達到這個獲利幅度且過熱時，會提示可以考慮先了結一部分。0 = 不看獲利了結。")
+    with c3:
+        if st.button("💾 儲存這份庫存清單"):
+            save_holdings_to_disk(holdings_df)
+            st.session_state["holdings_editor"] = holdings_df
+            st.success("庫存清單已儲存到本機。")
+
+    if st.button("🩺 開始健康檢查", type="primary"):
+        _clean_holdings = holdings_df.dropna(subset=["股票代碼"])
+        _clean_holdings = _clean_holdings[_clean_holdings["股票代碼"].astype(str).str.strip() != ""]
+        if _clean_holdings.empty:
+            st.warning("請先在上面的表格輸入至少一檔庫存（股票代碼、股數、成本）。")
+        else:
+            save_holdings_to_disk(holdings_df)
+            st.session_state["holdings_editor"] = holdings_df
+            results = []
+            with st.status(f"🔎 正在檢查 {len(_clean_holdings)} 檔庫存…", expanded=False) as hstatus:
+                for i, row in _clean_holdings.iterrows():
+                    sid = str(row["股票代碼"]).strip().zfill(4)
+                    cost = safe_float(row.get("持有成本"))
+                    shares = safe_float(row.get("持有股數"), 0)
+                    try:
+                        stock_row = calculate_stock(sid, regime["regime"], regime)
+                        if stock_row is None:
+                            results.append({"股票代碼": sid, "操作建議": "⚠️ 查無資料", "理由": ["抓不到這檔股票的資料，請確認代碼是否正確。"]})
+                        else:
+                            r = evaluate_holding_action(stock_row, cost, shares, stop_loss_pct, take_profit_pct or None)
+                            r["股票代碼"] = sid
+                            results.append(r)
+                    except Exception as exc:
+                        _log_api_error("evaluate_holding_action", sid, exc)
+                        results.append({"股票代碼": sid, "操作建議": "⚠️ 檢查失敗", "理由": ["這檔股票暫時檢查失敗，稍後再試一次。"]})
+                    hstatus.update(label=f"🔎 正在檢查… {i+1}/{len(_clean_holdings)}")
+                _flush_api_errors()
+            st.session_state["holdings_health_res"] = results
+
+    if st.session_state.get("holdings_health_res"):
+        results = st.session_state["holdings_health_res"]
+        action_order = {"🔻 建議停損": 0, "🚪 建議出清": 1, "🎯 可考慮部分獲利了結": 2, "➕ 可考慮攤平": 3,
+                         "📈 可考慮加碼": 4, "🤝 續抱觀察": 5, "⚠️ 資料不足": 6, "⚠️ 查無資料": 6, "⚠️ 檢查失敗": 6}
+        results_sorted = sorted(results, key=lambda r: action_order.get(r.get("操作建議"), 9))
+
+        n_stop = sum(1 for r in results if r.get("操作建議") in ("🔻 建議停損", "🚪 建議出清"))
+        n_add = sum(1 for r in results if r.get("操作建議") in ("📈 可考慮加碼", "➕ 可考慮攤平"))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("庫存檔數", len(results))
+        m2.metric("需要注意（停損／出清）", n_stop)
+        m3.metric("可考慮加碼／攤平", n_add)
+
+        st.divider()
+        for r in results_sorted:
+            action = r.get("操作建議", "")
+            border = "#ff453a" if "停損" in action or "出清" in action else \
+                     "#30d158" if "加碼" in action or "攤平" in action or "獲利了結" in action else \
+                     "var(--border-c)"
+            price_line = f"現價 {r['現價']:.2f}　" if not pd.isna(r.get("現價", np.nan)) else ""
+            pnl_line = f"損益 {r['損益%']:+.1f}%　" if not pd.isna(r.get("損益%", np.nan)) else ""
+            stop_line = f"參考停損價 {r['建議停損價']:.2f}" if not pd.isna(r.get("建議停損價", np.nan)) else ""
+            reasons_html = "".join(f"<li>{x}</li>" for x in r.get("理由", []))
+            st.markdown(f"""
+<div class="pick-card" style="border-left:3px solid {border}; padding:14px 16px; margin-bottom:10px; background:var(--bg-card); border-radius:10px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+        <div style="font-size:16px; font-weight:700;">{r.get('股票代碼','')} · {action}</div>
+        <div style="font-size:13px; color:var(--text-sub);">{price_line}{pnl_line}{stop_line}</div>
+    </div>
+    <ul style="margin:8px 0 0 18px; padding:0; font-size:13.5px; color:var(--text-sub); line-height:1.6;">
+        {reasons_html}
+    </ul>
+</div>
+""", unsafe_allow_html=True)
+        st.caption("以上為規則式參考建議（依買進分、技術狀態、ATR 與你設定的停損／停利門檻計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
+
 with tab_verify:
     st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
     sub_year, sub_week, sub_single, sub_portfolio, sub_wf = st.tabs(["⏳ 年份模擬", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward"])
