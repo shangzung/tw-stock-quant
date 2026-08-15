@@ -12,6 +12,7 @@ import time
 import math
 import json
 import threading
+import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -132,6 +133,35 @@ def save_holdings_to_disk(df):
     except Exception:
         return False
 
+
+def holdings_rows_from_df(df):
+    """把持久化用的 DataFrame 轉成自訂列編輯器用的 list-of-dict（每列一個穩定 id）。"""
+    rows = []
+    if df is not None and not df.empty:
+        for _, r in df.iterrows():
+            code = r.get("股票代碼")
+            code = "" if pd.isna(code) else str(code).strip()
+            if not code:
+                continue
+            shares = r.get("持有股數")
+            cost = r.get("持有成本")
+            rows.append({
+                "id": str(uuid.uuid4()),
+                "code": code,
+                "shares": 0.0 if pd.isna(shares) else float(shares),
+                "cost": 0.0 if pd.isna(cost) else float(cost),
+            })
+    if not rows:
+        rows.append({"id": str(uuid.uuid4()), "code": "", "shares": 0.0, "cost": 0.0})
+    return rows
+
+
+def holdings_df_from_rows(rows):
+    """把自訂列編輯器的資料轉回原本程式碼共用的 DataFrame 格式。"""
+    data = [{"股票代碼": (r.get("code") or "").strip(), "持有股數": r.get("shares", 0) or 0,
+             "持有成本": r.get("cost", 0.0) or 0.0} for r in rows]
+    return _coerce_holdings_dtypes(pd.DataFrame(data)) if data else _coerce_holdings_dtypes(None)
+
 # =========================
 # 0. Streamlit & Mac CSS & 狀態初始化
 # =========================
@@ -163,13 +193,13 @@ if "single_backtest_res" not in st.session_state: st.session_state["single_backt
 if "portfolio_backtest_res" not in st.session_state: st.session_state["portfolio_backtest_res"] = None
 if "wf_res" not in st.session_state: st.session_state["wf_res"] = None
 if "stock_lookup_res" not in st.session_state: st.session_state["stock_lookup_res"] = None
-if "watchlist_editor" not in st.session_state:
-    st.session_state["watchlist_editor"] = pd.DataFrame({"股票代碼": ["2330", "5351", "3481", "2317", "2454"]})
+if "watchlist_codes" not in st.session_state:
+    st.session_state["watchlist_codes"] = ["2330", "5351", "3481", "2317", "2454"]
 if "token_applied" not in st.session_state:
     # App 重開後，先把上次儲存的 Token 讀回來，不用每次都重新輸入。
     st.session_state["token_applied"] = load_saved_token()
-if "holdings_editor" not in st.session_state:
-    st.session_state["holdings_editor"] = load_saved_holdings()
+if "holdings_rows" not in st.session_state:
+    st.session_state["holdings_rows"] = holdings_rows_from_df(load_saved_holdings())
 if "holdings_health_res" not in st.session_state:
     st.session_state["holdings_health_res"] = None
 
@@ -189,6 +219,19 @@ st.markdown("""
         --accent-green: #30d158;
         --accent-yellow: #ffd60a;
         --accent-red: #ff453a;
+        /* data_editor / dataframe 是 canvas 畫的 glide-data-grid，顏色主要靠 .streamlit/config.toml
+           的 [theme] 設定；這裡的變數是給有支援讀 CSS 變數版本的備援，不是主要修法 */
+        --gdg-bg-cell: #1c1c1e;
+        --gdg-bg-cell-medium: #2c2c2e;
+        --gdg-bg-header: #2c2c2e;
+        --gdg-bg-header-has-focus: #3a3a3c;
+        --gdg-border-color: #3a3a3c;
+        --gdg-text-dark: #f5f5f7;
+        --gdg-text-medium: #a1a1a6;
+        --gdg-text-light: #a1a1a6;
+        --gdg-accent-color: #0a84ff;
+        --gdg-accent-fg: #ffffff;
+        --gdg-bg-bubble: #2c2c2e;
     }
 
     html, body, [class*="css"] {
@@ -472,6 +515,54 @@ st.markdown("""
 
     @media (max-width: 900px) {
         .risk-profile-grid, .stat-chip-row, .price-target-row { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* ── 側邊欄自選觀察名單：chip 清單，取代原本的 data_editor 白底表格 ── */
+    .chip-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 9px 12px; margin-bottom: 6px;
+        border-radius: 9px; border: 1px solid var(--border-c);
+        background-color: var(--bg-card-2);
+        font-size: 13.5px; font-weight: 600;
+        font-variant-numeric: tabular-nums;
+    }
+    .chip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-blue); flex-shrink: 0; }
+    [data-testid="stSidebar"] .stButton>button {
+        padding: 0.25rem 0.5rem !important; min-height: 34px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="column"]:has(button[kind="secondary"]) { display:flex; align-items:center; }
+
+    /* ── 持有部位 / 自訂列編輯器：欄位標題列 ── */
+    .row-editor-head {
+        font-size: 11.5px; font-weight: 700; color: var(--text-sub);
+        letter-spacing: 0.03em; padding: 0 2px 6px 2px; text-transform: uppercase;
+    }
+
+    /* st.container(border=True) 用在「持有部位」每一列，統一卡片化風格，取代 data_editor 的白底格線 */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 10px !important;
+        border-color: var(--border-c) !important;
+        background-color: var(--bg-card-2) !important;
+        transition: border-color 0.15s ease-in-out;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]:hover { border-color: #55555a !important; }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"] { gap: 0 !important; }
+
+    /* number_input 的加減按鈕深色化，字型改等寬數字，更有「金融終端機」的專業感 */
+    [data-testid="stNumberInput"] input, [data-testid="stTextInput"] input {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600 !important;
+    }
+    [data-testid="stNumberInput"] button {
+        background-color: var(--bg-card) !important;
+        border-color: var(--border-c) !important;
+        color: var(--text-sub) !important;
+    }
+    [data-testid="stNumberInput"] button:hover { background-color: var(--bg-card-2) !important; color: var(--text-main) !important; }
+
+    /* 表單（新增觀察股 / 未來擴充）容器去除多餘留白，融入側邊欄風格 */
+    [data-testid="stSidebar"] [data-testid="stForm"] {
+        border: none !important; padding: 0 !important; background: transparent !important;
     }
 
     /* ── 隱藏 Streamlit 自帶的工具列 / Deploy 按鈕 / Fork·GitHub 按鈕 / 頁尾浮水印 ──
@@ -1685,21 +1776,40 @@ def walk_forward_test(stocks, initial_capital, fee, tax, slippage, hold_days=10,
 # 8. UI Sidebar（只留下每個分頁都會用到的東西：自選股 + 大盤狀態）
 # =========================
 st.sidebar.subheader("📌 自選觀察名單")
-st.sidebar.caption("可直接增刪列；代碼限 4 碼，這份名單會同步套用到「股票分析」與「歷史驗證」。")
-watch_df = st.sidebar.data_editor(
-    st.session_state["watchlist_editor"],
-    num_rows="dynamic",
-    hide_index=True,
-    use_container_width=True,
-    column_config={
-        "股票代碼": st.column_config.TextColumn("股票代碼", help="輸入 4 碼台股代號", max_chars=4)
-    },
-    key="watchlist_editor_widget",
-)
-raw_watch = "\n".join(watch_df.get("股票代碼", pd.Series(dtype=str)).fillna("").astype(str).tolist())
-stocks = clean_stock_list(raw_watch)
-if len(stocks) != len(watch_df.dropna(how="all")):
-    st.sidebar.warning("有無效代碼已自動略過，請確認是否為 4 碼股票代號。")
+st.sidebar.caption("同步套用到「股票分析」與「歷史驗證」，代碼限 4 碼。")
+
+if st.session_state["watchlist_codes"]:
+    st.sidebar.markdown('<div class="chip-list">', unsafe_allow_html=True)
+    _remove_watch_idx = None
+    for _i, _code in enumerate(st.session_state["watchlist_codes"]):
+        _wc1, _wc2 = st.sidebar.columns([5, 1])
+        _wc1.markdown(f'<div class="chip-item"><span class="chip-dot"></span>{_code}</div>', unsafe_allow_html=True)
+        if _wc2.button("✕", key=f"del_watch_{_i}_{_code}", help="從觀察名單移除"):
+            _remove_watch_idx = _i
+    st.sidebar.markdown('</div>', unsafe_allow_html=True)
+    if _remove_watch_idx is not None:
+        st.session_state["watchlist_codes"].pop(_remove_watch_idx)
+        st.rerun()
+else:
+    st.sidebar.caption("目前名單是空的，在下面新增第一檔代碼。")
+
+with st.sidebar.form("add_watch_form", clear_on_submit=True):
+    _wa1, _wa2 = st.columns([5, 1.6])
+    _new_code = _wa1.text_input("新增代碼", max_chars=4, label_visibility="collapsed", placeholder="＋ 輸入 4 碼代號")
+    _submitted = _wa2.form_submit_button("加入")
+    if _submitted and _new_code.strip():
+        _cc = clean_stock_list(_new_code)
+        if not _cc:
+            st.sidebar.warning("代碼格式不正確，需為 4 碼數字。")
+        elif _cc[0] in st.session_state["watchlist_codes"]:
+            st.sidebar.info(f"{_cc[0]} 已經在名單中了。")
+        else:
+            st.session_state["watchlist_codes"].append(_cc[0])
+            st.rerun()
+
+stocks = clean_stock_list("\n".join(st.session_state["watchlist_codes"]))
+st.session_state["watchlist_codes"] = stocks
+
 
 # 回測參數的預設值（實際輸入元件移到「⚙️ 系統設定」分頁）
 _settings_defaults = {"initial_capital": 1_000_000, "fee": 0.001425, "tax": 0.003, "slippage": 0.0015, "top_n": 5, "hold_days": 10, "scan_workers": 3}
@@ -2141,18 +2251,42 @@ with tab_holdings:
         """)
 
     st.markdown("##### 持有部位")
-    holdings_df = st.data_editor(
-        st.session_state["holdings_editor"],
-        num_rows="dynamic",
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "股票代碼": st.column_config.TextColumn("股票代碼", help="輸入 4 碼台股代號", max_chars=4, width="small"),
-            "持有股數": st.column_config.NumberColumn("持有股數", help="總持有股數（不是張數）", min_value=0, step=1000, format="%d"),
-            "持有成本": st.column_config.NumberColumn("持有成本（每股）", help="平均持有成本，多次買進請自行加權平均", min_value=0.0, step=0.1, format="%.2f"),
-        },
-        key="holdings_editor_widget",
-    )
+    _hh1, _hh2, _hh3, _hh4 = st.columns([2.2, 2, 2, 0.8])
+    _hh1.markdown('<div class="row-editor-head">股票代碼</div>', unsafe_allow_html=True)
+    _hh2.markdown('<div class="row-editor-head">持有股數</div>', unsafe_allow_html=True)
+    _hh3.markdown('<div class="row-editor-head">持有成本（每股）</div>', unsafe_allow_html=True)
+    _hh4.markdown('<div class="row-editor-head">&nbsp;</div>', unsafe_allow_html=True)
+
+    _remove_holding_idx = None
+    for _i, _row in enumerate(st.session_state["holdings_rows"]):
+        with st.container(border=True):
+            rc1, rc2, rc3, rc4 = st.columns([2.2, 2, 2, 0.8])
+            _code_val = rc1.text_input("股票代碼", value=_row.get("code", ""), max_chars=4,
+                                        key=f"h_code_{_row['id']}", label_visibility="collapsed",
+                                        placeholder="4 碼代號")
+            _shares_val = rc2.number_input("持有股數", value=float(_row.get("shares", 0) or 0), min_value=0.0,
+                                            step=1000.0, format="%.0f", key=f"h_shares_{_row['id']}",
+                                            label_visibility="collapsed")
+            _cost_val = rc3.number_input("持有成本", value=float(_row.get("cost", 0.0) or 0.0), min_value=0.0,
+                                          step=0.1, format="%.2f", key=f"h_cost_{_row['id']}",
+                                          label_visibility="collapsed")
+            _row["code"] = _code_val.strip()
+            _row["shares"] = _shares_val
+            _row["cost"] = _cost_val
+            if rc4.button("🗑️", key=f"h_del_{_row['id']}", help="刪除這一列", use_container_width=True):
+                _remove_holding_idx = _i
+
+    if _remove_holding_idx is not None:
+        st.session_state["holdings_rows"].pop(_remove_holding_idx)
+        if not st.session_state["holdings_rows"]:
+            st.session_state["holdings_rows"].append({"id": str(uuid.uuid4()), "code": "", "shares": 0.0, "cost": 0.0})
+        st.rerun()
+
+    if st.button("＋ 新增一檔持股", use_container_width=True):
+        st.session_state["holdings_rows"].append({"id": str(uuid.uuid4()), "code": "", "shares": 0.0, "cost": 0.0})
+        st.rerun()
+
+    holdings_df = holdings_df_from_rows(st.session_state["holdings_rows"])
 
     st.markdown("##### 風險偏好")
     st.caption("決定「成本下限」這條保底防線；真正的停損／停利價仍會依每檔股票當下的趨勢與波動度動態調整。")
@@ -2183,17 +2317,15 @@ with tab_holdings:
     with bcol2:
         if st.button("💾 儲存這份庫存清單", use_container_width=True):
             save_holdings_to_disk(holdings_df)
-            st.session_state["holdings_editor"] = holdings_df
             st.success("庫存清單已儲存到本機。")
 
     if run_check:
         _clean_holdings = holdings_df.dropna(subset=["股票代碼"])
         _clean_holdings = _clean_holdings[_clean_holdings["股票代碼"].astype(str).str.strip() != ""]
         if _clean_holdings.empty:
-            st.warning("請先在上面的表格輸入至少一檔庫存（股票代碼、股數、成本）。")
+            st.warning("請先在上面輸入至少一檔庫存（股票代碼、股數、成本）。")
         else:
             save_holdings_to_disk(holdings_df)
-            st.session_state["holdings_editor"] = holdings_df
             results = []
             with st.status(f"🔎 正在檢查 {len(_clean_holdings)} 檔庫存…", expanded=False) as hstatus:
                 for i, row in _clean_holdings.iterrows():
