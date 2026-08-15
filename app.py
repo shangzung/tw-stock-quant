@@ -1,5 +1,5 @@
 # app.py
-# 台股 V8.4 研究級量化決策 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
+# 台股 V8.5 研究級量化決策 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -380,6 +380,17 @@ st.markdown("""
         border: 1px solid var(--border-c);
         box-shadow: 0 10px 30px rgba(0,0,0,0.35);
     }
+    .hero-topline { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
+    .hero-live { font-size:11px; font-weight:700; color:var(--accent-green); letter-spacing:.04em; }
+    .terminal-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:0 0 18px 0; }
+    .terminal-card { padding:14px 16px; border:1px solid var(--border-c); border-radius:12px; background:linear-gradient(180deg,#202024 0%,#171719 100%); }
+    .terminal-card .tc-label { font-size:10px; letter-spacing:.09em; color:var(--text-sub); font-weight:700; }
+    .terminal-card .tc-value { margin-top:6px; font-size:24px; line-height:1.1; font-weight:800; font-variant-numeric:tabular-nums; }
+    .terminal-card .tc-unit { font-size:12px; color:var(--text-sub); margin-left:3px; }
+    .terminal-card .tc-sub { margin-top:6px; font-size:11.5px; color:var(--text-sub); line-height:1.4; }
+    @media (max-width: 900px) { .terminal-grid { grid-template-columns:1fr 1fr; } }
+    @media (max-width: 560px) { .terminal-grid { grid-template-columns:1fr; } }
+
     .hero-banner .hero-eyebrow {
         display: inline-flex;
         align-items: center;
@@ -582,19 +593,21 @@ st.markdown("""
 
 st.markdown("""
 <div class="hero-banner">
-    <span class="hero-eyebrow">🧭 Quant Compass · 研究級量化平台</span>
+    <div class="hero-topline">
+        <span class="hero-eyebrow">🧭 QUANT COMPASS · RESEARCH TERMINAL</span>
+        <span class="hero-live">● EOD / Point-in-Time</span>
+    </div>
     <h1>台股量化羅盤</h1>
     <div class="hero-sub">
-        一站完成「今日該看哪幾檔」到「這個策略歷史上到底行不行」——
-        整合基本面、估值、護城河、籌碼與技術面，用同一套買進分邏輯做選股，並以
-        Point-in-Time 回測驗證，避免未來函數與資料偷看。
+        從「今天看哪幾檔」到「歷史上是否值得信任」，用同一套多因子買進分，
+        再以交易成本、Benchmark 與 Out-of-Sample 驗證把故事拆開看。
     </div>
     <div class="hero-tags">
-        <span class="hero-tag">📊 每日智慧選股</span>
-        <span class="hero-tag">🧪 Point-in-Time 回測</span>
-        <span class="hero-tag">💼 投組與換股成本</span>
-        <span class="hero-tag">📈 Benchmark 超額報酬</span>
+        <span class="hero-tag">📊 多因子選股</span>
+        <span class="hero-tag">🧪 PIT 回測</span>
+        <span class="hero-tag">📈 超額報酬</span>
         <span class="hero-tag">🛡️ ATR 風控</span>
+        <span class="hero-tag">💼 投組換股</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -730,6 +743,70 @@ def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN
     if score >= 65:
         return "🟡 觀察"
     return "🔴 不買"
+
+
+
+def decision_priority(score, risk, market_regime, status):
+    """把買進分、風險與市場環境整合成 UI 用的優先級；不改變核心買進分。"""
+    score = safe_float(score, 0)
+    risk_penalty = {"🟢 低": 0, "🟡 中": 8, "🔴 高": 18}.get(risk, 10)
+    regime_penalty = {"BULL": 0, "NEUTRAL": 6, "BEAR": 15}.get(market_regime, 10)
+    heat_penalty = 8 if "過熱" in str(status) else 0
+    return round(clamp(score - risk_penalty - regime_penalty - heat_penalty), 1)
+
+
+def data_quality_label(result):
+    """UI 顯示資料完整度，避免使用者把缺資料誤認成低分。"""
+    if not result:
+        return "⚪ 無資料"
+    fields = ["基本面", "估值", "籌碼", "技術", "RSI", "ADX", "ATR"]
+    valid = sum(not pd.isna(safe_float(result.get(k))) for k in fields)
+    if valid >= 7:
+        return "🟢 完整"
+    if valid >= 5:
+        return "🟡 部分缺資料"
+    return "🔴 資料不足"
+
+
+def risk_reward_ratio(price, stop, target):
+    price, stop, target = safe_float(price), safe_float(stop), safe_float(target)
+    if any(pd.isna(v) for v in [price, stop, target]) or price <= stop:
+        return np.nan
+    risk = price - stop
+    reward = target - price
+    return reward / risk if risk > 0 else np.nan
+
+
+def render_factor_bars(result):
+    """股票分析頁的因子拆解：讓買進分不是黑箱。"""
+    factors = [
+        ("基本面", result.get("基本面", np.nan)),
+        ("估值", result.get("估值", np.nan)),
+        ("籌碼", result.get("籌碼", np.nan)),
+        ("技術", result.get("技術", np.nan)),
+        ("護城河", result.get("護城河", np.nan)),
+        ("起漲", result.get("起漲分", np.nan)),
+    ]
+    rows = [(n, float(v)) for n, v in factors if not pd.isna(safe_float(v))]
+    if not rows:
+        return
+    fig = go.Figure(go.Bar(
+        x=[v for _, v in rows],
+        y=[n for n, _ in rows],
+        orientation="h",
+        text=[f"{v:.0f}" for _, v in rows],
+        textposition="outside",
+        hovertemplate="%{y}: %{x:.1f}<extra></extra>",
+    ))
+    fig.update_xaxes(range=[0, 100], title="因子強度")
+    fig.update_layout(
+        title="📊 買進分因子拆解",
+        template="plotly_dark",
+        height=330,
+        margin=dict(l=20, r=45, t=55, b=35),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 def momentum_status(ret20, rsi, vol_ratio, close, ma20, ma60, distance_20_high):
@@ -1478,13 +1555,22 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
         change_5d_pct = (price / ref5_close - 1) * 100 if not pd.isna(ref5_close) and ref5_close > 0 else np.nan
         limit_status = limit_up_status(price, prev_close, safe_float(x.get("max")), safe_float(x.get("min")), day_change_pct)
         decision = decision_label(buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"), market_regime=regime_dict["regime"])
+        priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
+        quality_inputs = {
+            "基本面": any(not pd.isna(safe_float(fund.get(k))) for k in ["roe","roa","gross_margin","op_margin","eps_growth","revenue_growth"]),
+            "估值": any(not pd.isna(safe_float(val.get(k))) for k in ["PER","PBR"]),
+            "籌碼": bool(chip_detail),
+            "技術": all(not pd.isna(safe_float(x.get(k))) for k in ["RSI","ADX","ATR"]),
+        }
+        quality = "🟢 完整" if sum(quality_inputs.values()) == 4 else ("🟡 部分缺資料" if sum(quality_inputs.values()) >= 2 else "🔴 資料不足")
         if decision == "🟢 可買": explanation = "整體條件強，趨勢、基本面、估值與籌碼條件同步。"
         elif decision == "🟡 過熱觀察": explanation = "趨勢仍強，但短線動能偏熱，優先等回檔或確認。"
         elif decision == "⚠️ 漲停勿追": explanation = "分數高不代表可以追價，價格已接近漲停區。"
         elif decision == "🔴 不買": explanation = "多項條件未同時成立，目前不列入新增買進。"
         else: explanation = "條件介於中間，等待更多訊號確認。"
         reasons = build_reasons(decision, breakout_reasons, chip_detail, fund, val, status_label)
-        return {"股票代碼": stock_id, "現價": round(price,2), "買進分": round(buy_score,1), "狀態": status_label, "風險": risk,
+        return {"股票代碼": stock_id, "現價": round(price,2), "買進分": round(buy_score,1), "優先級": priority,
+                "狀態": status_label, "風險": risk, "資料品質": quality,
                 "近1日漲跌%": round(day_change_pct,2) if not pd.isna(day_change_pct) else np.nan, "近5日漲跌%": round(change_5d_pct,2) if not pd.isna(change_5d_pct) else np.nan,
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
@@ -1696,11 +1782,16 @@ def trade_costs(notional, fee, tax=0, slippage=0, side="buy"):
     return notional*fee + notional*slippage + (notional*tax if side=="sell" else 0)
 
 
-def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=10):
+def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=10, start_date=None, end_date=None):
     sources=prepare_pit_sources(stock_id,1500); daily=add_technical_indicators(sources["daily"])
     if daily.empty or len(daily)<250: return None
+    daily["date"]=pd.to_datetime(daily["date"], errors="coerce")
     mkt=get_yahoo_taiex(); equity=[]; trades=[]; cash=float(initial_capital); shares=0; entry_price=0; entry_date=None; entry_i=0
+    start_ts=pd.Timestamp(start_date) if start_date is not None else None
+    end_ts=pd.Timestamp(end_date) if end_date is not None else None
     for i in range(120,len(daily)-1):
+        if start_ts is not None and daily.iloc[i]["date"] < start_ts: continue
+        if end_ts is not None and daily.iloc[i]["date"] > end_ts: break
         row=daily.iloc[i]; next_row=daily.iloc[i+1]; date=pd.Timestamp(row["date"])
         reg=market_regime(date,mkt); snap=calculate_stock_snapshot(stock_id,date,sources,reg)
         if snap is None: continue
@@ -1736,20 +1827,29 @@ def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, 
         if progress_cb: progress_cb((idx+1)/len(stocks))
     if not data:return None
     mkt=get_yahoo_taiex(); all_dates=sorted(set().union(*[set(pd.to_datetime(src["daily"]["date"])) for src in data.values()])); all_dates=pd.DatetimeIndex(all_dates)
-    value=float(initial_capital); equity=[]; holdings={}; last_rebalance=-999; turnover_cost_total=0
+    value=float(initial_capital); equity=[]; holdings={}; pending_weights=None; pending_date=None; last_rebalance=-999; turnover_cost_total=0
     for i,date in enumerate(all_dates):
         if i<120: continue
+
+        # 用前一個交易日收盤產生訊號，下一交易日才套用權重，避免 look-ahead。
+        if pending_weights is not None and pending_date is not None and date >= pending_date:
+            new_weights=pending_weights
+            sells=sum(max(0,holdings.get(s,0)-new_weights.get(s,0)) for s in set(new_weights)|set(holdings))
+            turnover=sum(abs(new_weights.get(s,0)-holdings.get(s,0)) for s in set(new_weights)|set(holdings))
+            cost=value*turnover*(fee+slippage)+value*sells*tax
+            value=max(0,value-cost); turnover_cost_total+=cost; holdings=new_weights
+            pending_weights=None; pending_date=None
+
         if i-last_rebalance>=rebalance_days:
             scores={}; reg=market_regime(date,mkt)
             for s,src in data.items():
                 snap=calculate_stock_snapshot(s,date,src,reg)
                 if snap is not None: scores[s]=snap["買進分"]
             ranked=[s for s,v in sorted(scores.items(),key=lambda z:z[1],reverse=True) if v>=65][:top_n]
-            new_weights={s:1/len(ranked) for s in ranked} if ranked else {}
-            sells=sum(max(0,holdings.get(s,0)-new_weights.get(s,0)) for s in set(new_weights)|set(holdings))
-            turnover=sum(abs(new_weights.get(s,0)-holdings.get(s,0)) for s in set(new_weights)|set(holdings))
-            cost=value*turnover*(fee+slippage)+value*sells*tax
-            value=max(0,value-cost); turnover_cost_total+=cost; holdings=new_weights; last_rebalance=i
+            pending_weights={s:1/len(ranked) for s in ranked} if ranked else {}
+            pending_date=all_dates[min(i+1, len(all_dates)-1)]
+            last_rebalance=i
+
         day_ret=0.0
         for s,w in holdings.items():
             d=data[s]["daily"].copy(); d["date"]=pd.to_datetime(d["date"]); idxs=d.index[d["date"]==date]
@@ -1763,13 +1863,43 @@ def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, 
 
 
 def walk_forward_test(stocks, initial_capital, fee, tax, slippage, hold_days=10, train_years=2, test_years=1):
+    """真正的 rolling OOS 報告。
+    本版不做參數最佳化，因此 train 區只用來建立時間切點；test 區完全封存，
+    並以同一套 Point-in-Time 買進分引擎做測試。
+    """
     rows=[]
     if not stocks:return pd.DataFrame()
-    # 以單股統一引擎做 out-of-sample：訓練期只用於報告，不調參；測試期完全獨立。
     for s in stocks:
-        r=backtest_single(s,initial_capital,fee,tax,slippage,hold_days=hold_days)
-        if r:
-            rows.append({"股票":s,"CAGR":r.get("cagr",np.nan)*100,"MDD":r.get("mdd",np.nan)*100,"Sharpe":r.get("sharpe",np.nan),"OOS勝率":r.get("win_rate",np.nan),"交易次數":r.get("trades",0),"狀態":"OOS 回測完成"})
+        try:
+            src=prepare_pit_sources(s, 1500)
+            d=src["daily"].copy()
+            if d.empty: continue
+            d["date"]=pd.to_datetime(d["date"], errors="coerce")
+            first, last=d["date"].min(), d["date"].max()
+            cursor=first + pd.DateOffset(years=train_years)
+            fold=1
+            while cursor + pd.DateOffset(years=test_years) <= last:
+                test_start=cursor
+                test_end=min(cursor + pd.DateOffset(years=test_years) - pd.Timedelta(days=1), last)
+                r=backtest_single(
+                    s, initial_capital, fee, tax, slippage, hold_days=hold_days,
+                    start_date=test_start, end_date=test_end
+                )
+                if r:
+                    rows.append({
+                        "股票":s, "Fold":fold,
+                        "訓練區間":f"{first:%Y-%m-%d} ~ {(test_start-pd.Timedelta(days=1)):%Y-%m-%d}",
+                        "OOS測試區間":f"{test_start:%Y-%m-%d} ~ {test_end:%Y-%m-%d}",
+                        "CAGR":r.get("cagr",np.nan)*100,
+                        "MDD":r.get("mdd",np.nan)*100,
+                        "Sharpe":r.get("sharpe",np.nan),
+                        "OOS勝率":r.get("win_rate",np.nan),
+                        "交易次數":r.get("trades",0),
+                    })
+                cursor=cursor + pd.DateOffset(years=test_years)
+                fold+=1
+        except Exception as e:
+            _log_api_error("walk_forward_test", s, e)
     return pd.DataFrame(rows)
 
 # =========================
@@ -1837,7 +1967,7 @@ def render_settings_tab():
     """把 Token / API 診斷 / 回測費率／投組持股數 全部集中在這一個分頁，
     一般使用者完全不需要打開就能用『今日選股』。"""
     st.subheader("🔑 FinMind Token")
-    st.caption("免費註冊 FinMind 帳號即可取得 Token，額度會從 300 次/hr 提高到 600 次/hr。輸入後按下方按鈕套用並儲存到本機，下次開啟 App 會自動帶入，不用重新輸入。")
+    st.caption("免費註冊 FinMind 帳號即可取得 Token，額度會從 300 次/hr 提高到 600 次/hr。輸入後按下方按鈕套用並儲存到本機，下次開啟 App 會自動帶入。若要部署到雲端，請改用 secrets，不要把 Token 寫進程式碼或 Git。")
     st.markdown("🔗 [前往 FinMind 官網免費註冊 / 索取 Token](https://finmindtrade.com/analysis/#/data/api_token)")
     user_token_input = st.text_input(
         "輸入 FinMind Token (選填)",
@@ -1992,7 +2122,8 @@ def render_pick_card(row, rank=None):
             <span class="pick-name">{prefix}{row['股票代碼']} {name}</span>
             <span class="pick-score">{row['買進分']:.0f}</span>
         </div>
-        <div class="pick-sub">{row['決策']} ・ {row.get('狀態','')} ・ 風險 {row.get('風險','')} ・ 現價 {row['現價']} ・ 今日 {format_num(row.get('近1日漲跌%'), 1, '%')} ・ 5日 {format_num(row.get('近5日漲跌%'), 1, '%')}</div>
+        <div class="pick-sub">{row['決策']} ・ {row.get('狀態','')} ・ 風險 {row.get('風險','')} ・ 資料 {row.get('資料品質','—')} ・ 現價 {row['現價']} ・ 今日 {format_num(row.get('近1日漲跌%'), 1, '%')} ・ 5日 {format_num(row.get('近5日漲跌%'), 1, '%')}</div>
+        <div class="pick-sub">風險調整優先級：<b>{row.get('優先級', row.get('買進分', 0)):.0f}</b> / 100</div>
         <div class="pick-reason">{reasons_html}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2016,7 +2147,12 @@ def style_scan_table(df):
 def scan_column_config():
     cfg = {}
     if hasattr(st, "column_config"):
-        cfg["買進分"] = st.column_config.ProgressColumn("買進分", min_value=0, max_value=100, format="%.0f")
+        cfg["買進分"] = st.column_config.ProgressColumn("買進分", min_value=0, max_value=100, format="%.0f", help="0–100 條件強度；不是未來報酬率或勝率。")
+        cfg["優先級"] = st.column_config.ProgressColumn("風險調整優先級", min_value=0, max_value=100, format="%.0f", help="買進分扣除風險、市況與過熱懲罰後的研究排序分。")
+        cfg["決策"] = st.column_config.TextColumn("決策", width="small")
+        cfg["狀態"] = st.column_config.TextColumn("狀態", width="medium")
+        cfg["風險"] = st.column_config.TextColumn("風險", width="small")
+        cfg["資料品質"] = st.column_config.TextColumn("資料品質", width="small")
         cfg["近1日漲跌%"] = st.column_config.NumberColumn("近1日漲跌%", format="%.1f%%")
         cfg["近5日漲跌%"] = st.column_config.NumberColumn("近5日漲跌%", format="%.1f%%")
         cfg["量比"] = st.column_config.NumberColumn("量比", format="%.2fx")
@@ -2032,7 +2168,7 @@ def show_scan_dataframe(df):
     shown = shown[order]
     st.dataframe(style_scan_table(shown), use_container_width=True, hide_index=True, column_config=scan_column_config())
 
-MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "決策", "狀態", "風險", "近1日漲跌%", "近5日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
+MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "近1日漲跌%", "近5日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
 
 # --- TAB：今日選股 ---
 with tab_today:
@@ -2048,7 +2184,17 @@ with tab_today:
     </div>
     """, unsafe_allow_html=True)
 
-    st.caption("打開就知道今天看什麼：不用先弄懂任何技術指標。")
+    regime_score = safe_float(regime.get("score"), 50)
+    regime_color = "var(--accent-green)" if regime.get("regime") == "BULL" else ("var(--accent-yellow)" if regime.get("regime") == "NEUTRAL" else "var(--accent-red)")
+    st.markdown(f"""
+    <div class="terminal-grid">
+      <div class="terminal-card"><div class="tc-label">MARKET REGIME</div><div class="tc-value" style="color:{regime_color};">{regime.get("regime","UNKNOWN")}</div><div class="tc-sub">{regime.get("message","")}</div></div>
+      <div class="terminal-card"><div class="tc-label">MARKET SCORE</div><div class="tc-value">{regime_score:.0f}<span class="tc-unit">/100</span></div><div class="tc-sub">MA20 / MA60 · MACD · ADX</div></div>
+      <div class="terminal-card"><div class="tc-label">DECISION RULE</div><div class="tc-value">多因子</div><div class="tc-sub">基本面 × 估值 × 籌碼 × 技術</div></div>
+      <div class="terminal-card"><div class="tc-label">DATA POLICY</div><div class="tc-value">PIT</div><div class="tc-sub">歷史訊號不使用未來日期資料</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("打開就知道今天看什麼：先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。")
 
     universe_df = get_stock_universe()
     if universe_df.empty:
@@ -2155,7 +2301,8 @@ with tab_today:
                 for rank, (_, row) in enumerate(top5_df.iterrows(), start=1):
                     render_pick_card(row, rank)
 
-            st.subheader("📋 今日掃描結果（依買進分排序）")
+            st.subheader("📋 今日掃描結果")
+            st.caption("先看「買進分」判斷條件強度，再看「風險／資料品質／風險調整優先級」決定研究順序；不要把買進分直接當成勝率。")
             show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
             show_scan_dataframe(out_df[show_cols])
 
@@ -2197,6 +2344,7 @@ with tab_stock:
                     "起漲理由": result["起漲理由"],
                 }])
                 st.dataframe(detail, use_container_width=True, hide_index=True)
+                render_factor_bars(result)
 
     else:
         if st.button("🚀 掃描自選清單", type="primary"):
@@ -2609,15 +2757,15 @@ with tab_verify:
 
     with sub_wf:
         st.subheader("🧪 Walk-Forward / Out-of-Sample")
-        st.markdown("**目的：** 不讓同一段歷史同時扮演訓練與驗證角色。V8.4 先提供可重複的 OOS 報表框架；後續若加入參數最佳化，訓練區間只能用來選參數，測試區間完全封存。")
+        st.markdown("**目的：** 不讓同一段歷史同時扮演訓練與驗證角色。現在會依訓練年數建立 rolling 時間切點，測試區間完全封存；本版不在訓練區自動調參，因此不把報告式訓練期冒充成最佳化結果。")
         if st.button("🧪 執行 OOS 驗證",type="primary"):
             with st.spinner("執行多標的 OOS 驗證..."):
                 st.session_state["wf_res"]=walk_forward_test(stocks,initial_capital,fee,tax,slippage,hold_days=hold_days)
         wf=st.session_state.get("wf_res")
         if wf is not None and not wf.empty:
             st.dataframe(wf,use_container_width=True,hide_index=True)
-            st.success("OOS 報表完成。注意：目前版本不自動最佳化參數，因此 Walk-Forward 的『訓練』階段是保留的研究框架，而非資料探勘器。")
+            st.success("OOS 報表完成。訓練區只用於建立時間切點，測試區完全獨立；本版不自動最佳化參數，避免把資料探勘結果誤當成真實 OOS。")
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
+st.caption("台股量化羅盤 Quant Compass V8.5 · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
