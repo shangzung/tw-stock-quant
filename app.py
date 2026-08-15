@@ -3740,3 +3740,4 @@ with tab_verify:
 # footer
 st.divider()
 st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
+    
