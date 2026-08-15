@@ -408,6 +408,72 @@ st.markdown("""
 
     hr, [data-testid="stDivider"] { border-color: var(--border-c) !important; opacity: 0.6; }
 
+    /* ── 庫存健康檢查：風險偏好卡片、信心分數條、統計卡、持股結果卡 ── */
+    .risk-profile-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin: 6px 0 4px 0;
+    }
+    .risk-profile-card {
+        padding: 14px 16px;
+        border-radius: 12px;
+        border: 1px solid var(--border-c);
+        background-color: var(--bg-card-2);
+    }
+    .risk-profile-card.active {
+        border-color: var(--accent-blue);
+        background: linear-gradient(180deg, rgba(10,132,255,0.14) 0%, var(--bg-card-2) 100%);
+        box-shadow: 0 0 0 1px var(--accent-blue) inset;
+    }
+    .risk-profile-card .rp-title { font-size: 14.5px; font-weight: 700; margin-bottom: 4px; display:flex; align-items:center; gap:6px;}
+    .risk-profile-card .rp-desc { font-size: 12px; color: var(--text-sub); line-height: 1.5; }
+    .risk-profile-card .rp-num { font-size: 11.5px; color: var(--accent-blue); font-weight: 600; margin-top: 6px; }
+
+    .stat-chip-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 4px 0 14px 0; }
+    .stat-chip {
+        padding: 14px 16px;
+        border-radius: 12px;
+        border: 1px solid var(--border-c);
+        background-color: var(--bg-card-2);
+        text-align: left;
+    }
+    .stat-chip .sc-label { font-size: 12px; color: var(--text-sub); font-weight: 600; margin-bottom: 6px; }
+    .stat-chip .sc-value { font-size: 24px; font-weight: 700; line-height: 1; }
+
+    .holding-card {
+        padding: 16px 18px;
+        border-radius: 14px;
+        border: 1px solid var(--border-c);
+        background-color: var(--bg-card-2);
+        margin-bottom: 12px;
+    }
+    .holding-card .hc-top { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+    .holding-card .hc-name { font-size: 17px; font-weight: 700; }
+    .holding-card .hc-badge {
+        display:inline-block; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 700;
+        margin-left: 8px; border: 1px solid transparent;
+    }
+    .holding-card .hc-meta { font-size: 12.5px; color: var(--text-sub); display:flex; gap:14px; flex-wrap:wrap; margin-top:6px; }
+    .holding-card .hc-meta b { color: var(--text-main); font-weight: 600; }
+
+    .confidence-row { display:flex; align-items:center; gap:10px; margin-top: 12px; }
+    .confidence-label { font-size: 12px; color: var(--text-sub); font-weight:600; white-space:nowrap; }
+    .confidence-track { flex:1; height: 8px; border-radius: 999px; background: var(--bg-main); border: 1px solid var(--border-c); overflow:hidden; }
+    .confidence-fill { height: 100%; border-radius: 999px; }
+    .confidence-num { font-size: 13px; font-weight: 700; width: 34px; text-align:right; }
+
+    .price-target-row { display:grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+    .price-target-box { padding: 8px 10px; border-radius: 10px; background: var(--bg-main); border: 1px solid var(--border-c); }
+    .price-target-box .pt-label { font-size: 11px; color: var(--text-sub); font-weight:600; }
+    .price-target-box .pt-value { font-size: 15px; font-weight: 700; margin-top: 2px; }
+
+    .holding-card ul.hc-reasons { margin: 12px 0 0 0; padding: 0 0 0 18px; font-size: 13.5px; color: var(--text-sub); line-height: 1.7; }
+
+    @media (max-width: 900px) {
+        .risk-profile-grid, .stat-chip-row, .price-target-row { grid-template-columns: 1fr 1fr; }
+    }
+
     /* ── 隱藏 Streamlit 自帶的工具列 / Deploy 按鈕 / Fork·GitHub 按鈕 / 頁尾浮水印 ──
        這些不是我們畫面的一部分，全部藏起來，讓畫面乾淨、只有這個 App 本身的內容。 */
     #MainMenu { visibility: hidden !important; }
@@ -1361,9 +1427,28 @@ def calculate_stock(stock_id, regime_tag, regime_dict):
 #     沿用跟「今日選股」完全相同的評分引擎（calculate_stock），
 #     再結合你自己輸入的持有成本，換算成停損／加碼／攤平／出清的操作建議。
 # =========================
+RISK_PROFILE_PRESETS = {
+    "保守": {"base_stop_loss_pct": 6.0, "desc": "資金保護優先，跌破防線就先出場，寧可少賺也不多賠。"},
+    "平衡": {"base_stop_loss_pct": 10.0, "desc": "在風險與空間之間取中間值，適合大多數人。"},
+    "積極": {"base_stop_loss_pct": 15.0, "desc": "願意承受較大波動、換取讓獲利部位『多跑一段』的空間。"},
+}
+
+
 def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_profit_pct=None):
-    """回傳這一檔庫存的健康檢查結果：操作建議、理由、參考停損價。
-    這是規則式的參考建議，不是投資建議，最終判斷仍要自己做。
+    """回傳這一檔庫存的健康檢查結果：操作建議、理由、AI 動態停損／停利價、續抱信心分。
+
+    核心邏輯（取代過去死板的固定 % 停損停利）：
+    1. 停損防線 = 「近期高點 - ATR × 趨勢係數」與「成本價 × (1-你的下限%)」兩者取較高（較不吃虧）的一個。
+       趨勢係數依 ADX（趨勢強度）自動調整：趨勢越強，給的空間越大，避免「一回檔就被洗出場、錯過主升段」；
+       趨勢走弱／盤整時則自動收緊，避免虧損持續擴大。
+    2. 停利改用「風險倍數（R-multiple）」動態目標價，而不是固定 %，獲利目標會隨波動度自動放大縮小，
+       並在達標時建議「先了結一部分、剩餘部位改設移動停損」，取代一次全出，兼顧「不賣飛」與「顧獲利」。
+    3. 攤平只在「基本面／技術面仍偏多、且尚未跌破你的停損防線」時才建議，並且明確提醒「最多攤平一次、
+       攤平後要重設停損」，避免陷入越攤越薄的無底洞。
+    4. 額外提供 0-100 的「續抱信心分」，把買進分、均線排列、是否過熱、風險燈號綜合成一個分數，
+       讓你在「續抱觀察」這種中性情況下，也能看出目前偏樂觀還是偏保守。
+
+    這是規則式＋量化訊號組成的參考建議，不是投資建議，最終判斷仍要自己做。
     """
     price = safe_float(stock_row.get("現價"))
     atr = safe_float(stock_row.get("ATR"))
@@ -1372,16 +1457,59 @@ def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_pro
     status = stock_row.get("狀態", "") or ""
     risk = stock_row.get("風險", "") or ""
     rsi = safe_float(stock_row.get("RSI"), 50)
+    adx = safe_float(stock_row.get("ADX"), 20)
+    if pd.isna(adx):
+        adx = 20
+
+    daily = stock_row.get("daily")
+    ma20 = ma60 = high60 = np.nan
+    if isinstance(daily, pd.DataFrame) and not daily.empty:
+        last = daily.iloc[-1]
+        ma20 = safe_float(last.get("MA20"))
+        ma60 = safe_float(last.get("MA60"))
+        high60 = safe_float(last.get("HIGH_60"))
 
     cost = safe_float(cost)
     pnl_pct = (price / cost - 1) * 100 if cost > 0 and not pd.isna(price) else np.nan
     market_value = price * shares if not pd.isna(price) else np.nan
     unrealized_pnl = (price - cost) * shares if (not pd.isna(price) and cost > 0) else np.nan
 
-    atr_stop = price - 2 * atr if (not pd.isna(price) and not pd.isna(atr) and atr > 0) else np.nan
+    # 1) 趨勢係數：ADX 越高（趨勢越明確），給的 ATR 緩衝倍數越大
+    if adx >= 30:
+        atr_mult, trend_tag = 3.0, "強趨勢"
+    elif adx >= 20:
+        atr_mult, trend_tag = 2.2, "中度趨勢"
+    else:
+        atr_mult, trend_tag = 1.4, "盤整偏弱"
+
+    trail_anchor = np.nanmax([v for v in [price, high60] if not pd.isna(v)]) if (
+        not pd.isna(price) or not pd.isna(high60)) else np.nan
+    atr_stop = trail_anchor - atr_mult * atr if (not pd.isna(trail_anchor) and not pd.isna(atr) and atr > 0) else np.nan
     hard_stop = cost * (1 - stop_loss_pct / 100) if cost > 0 else np.nan
-    suggested_stop = np.nanmax([v for v in [atr_stop, hard_stop] if not pd.isna(v)]) if any(
-        not pd.isna(v) for v in [atr_stop, hard_stop]) else np.nan
+    stop_candidates = [v for v in [atr_stop, hard_stop] if not pd.isna(v)]
+    suggested_stop = max(stop_candidates) if stop_candidates else np.nan
+    if not pd.isna(suggested_stop) and not pd.isna(price) and suggested_stop >= price:
+        suggested_stop = price * 0.97  # 極端情況的保護，避免停損價高於現價
+
+    # 2) 動態停利目標：以「風險倍數」取代固定 %，讓目標隨波動度自動縮放
+    risk_per_share = (price - suggested_stop) if (not pd.isna(suggested_stop) and not pd.isna(price)) else np.nan
+    target1 = price + risk_per_share * 1.5 if (not pd.isna(risk_per_share) and risk_per_share > 0) else np.nan
+    target2 = price + risk_per_share * 3.0 if (not pd.isna(risk_per_share) and risk_per_share > 0) else np.nan
+
+    # 3) 續抱信心分：買進分為底，疊加均線排列／是否過熱／風險燈號
+    confidence = buy_score
+    if not pd.isna(ma20) and not pd.isna(ma60) and not pd.isna(price):
+        if price > ma20 > ma60:
+            confidence += 8
+        elif price < ma20 < ma60:
+            confidence -= 10
+    if rsi >= 80:
+        confidence -= 12
+    elif rsi <= 25:
+        confidence -= 6
+    if risk == "🔴 高":
+        confidence -= 10
+    confidence = clamp(confidence)
 
     trend_broken = "🔴" in status
     tech_weak = "🔴" in decision
@@ -1391,34 +1519,42 @@ def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_pro
     if pd.isna(price):
         action = "⚠️ 資料不足"
         reasons.append("目前抓不到有效股價，稍後再檢查一次，或到「⚙️ 系統設定」看 API 診斷。")
-    elif not pd.isna(pnl_pct) and pnl_pct <= -stop_loss_pct:
+    elif not pd.isna(suggested_stop) and price <= suggested_stop:
         action = "🔻 建議停損"
-        reasons.append(f"未實現損益已達 {pnl_pct:.1f}%，跌破你設定的停損線 -{stop_loss_pct:.0f}%。")
+        reasons.append(f"現價已跌破 AI 動態停損防線 {suggested_stop:.2f}（依{trend_tag}、ATR×{atr_mult:.1f} 與你的成本下限估算）。")
         reasons.append("紀律優先：先出場保住本金，之後條件轉強再重新評估進場，比留在場上『賭它彈回來』更划算。")
     elif trend_broken and tech_weak:
         action = "🚪 建議出清"
         reasons.append("股價已跌破 MA20，且綜合決策已轉為「不買」等級，趨勢轉弱訊號明確。")
         if not pd.isna(pnl_pct):
             reasons.append(f"目前未實現損益 {pnl_pct:+.1f}%，技術面已不支持續抱。")
-    elif take_profit_pct and not pd.isna(pnl_pct) and pnl_pct >= take_profit_pct and overheated:
+    elif not pd.isna(target2) and not pd.isna(price) and price >= target2:
+        action = "🎯 建議獲利了結一部分"
+        reasons.append(f"現價已達 AI 第二目標 {target2:.2f}（風險倍數 3R），建議先了結約 1/3～1/2 部位落袋。")
+        reasons.append(f"剩餘部位改用移動停損 {suggested_stop:.2f} 顧住獲利即可，不用整筆賣掉，避免賣飛後面的漲幅。")
+    elif not pd.isna(target1) and not pd.isna(price) and price >= target1 and overheated:
         action = "🎯 可考慮部分獲利了結"
-        reasons.append(f"獲利已達 {pnl_pct:.1f}%，且短線偏過熱（{status}），可考慮先落袋一部分、剩餘部位設移動停利。")
-    elif not pd.isna(pnl_pct) and pnl_pct < 0 and buy_score >= 60 and risk != "🔴 高" and not trend_broken:
+        reasons.append(f"現價已達第一目標 {target1:.2f}，且短線偏過熱（{status}），可先落袋一小部分，其餘續抱看能不能挑戰 {target2:.2f}。")
+    elif not pd.isna(pnl_pct) and pnl_pct < 0 and buy_score >= 60 and risk != "🔴 高" and not trend_broken and not pd.isna(suggested_stop) and price > suggested_stop:
         action = "➕ 可考慮攤平"
-        reasons.append(f"目前未實現損益 {pnl_pct:.1f}%，但基本面／技術面條件仍偏正向（買進分 {buy_score:.0f}），且尚未跌破均線。")
-        reasons.append("攤平前務必先設好新的停損價，一旦再次跌破就出場，避免越攤越薄。")
+        reasons.append(f"目前未實現損益 {pnl_pct:.1f}%，但基本面／技術面條件仍偏正向（買進分 {buy_score:.0f}），且尚未跌破 AI 停損防線 {suggested_stop:.2f}。")
+        reasons.append("建議最多攤平一次：攤平後務必用新成本重新計算停損價，一旦再度跌破就出場，避免越攤越薄、掉進無底洞。")
     elif not pd.isna(pnl_pct) and pnl_pct >= 0 and "🟢" in decision and risk != "🔴 高" and not overheated:
         action = "📈 可考慮加碼"
         reasons.append(f"目前獲利 {pnl_pct:.1f}%，趨勢與買進條件持續偏多，且沒有短線過熱訊號。")
     else:
         action = "🤝 續抱觀察"
-        reasons.append("目前條件中性，沒有出現明確的加碼或減碼訊號，維持原部位即可。")
+        reasons.append(f"目前條件中性（續抱信心分 {confidence:.0f}），沒有出現明確的加碼或減碼訊號，維持原部位並持續留意停損防線 {suggested_stop:.2f}。" if not pd.isna(suggested_stop) else "目前條件中性，沒有出現明確的加碼或減碼訊號，維持原部位即可。")
 
     return {
         "現價": price, "損益%": round(pnl_pct, 2) if not pd.isna(pnl_pct) else np.nan,
         "市值": round(market_value, 0) if not pd.isna(market_value) else np.nan,
         "未實現損益": round(unrealized_pnl, 0) if not pd.isna(unrealized_pnl) else np.nan,
         "建議停損價": round(suggested_stop, 2) if not pd.isna(suggested_stop) else np.nan,
+        "目標價1": round(target1, 2) if not pd.isna(target1) else np.nan,
+        "目標價2": round(target2, 2) if not pd.isna(target2) else np.nan,
+        "續抱信心分": round(confidence, 0) if not pd.isna(confidence) else np.nan,
+        "趨勢係數": trend_tag,
         "買進分": buy_score, "決策": decision, "狀態": status, "風險": risk,
         "操作建議": action, "理由": reasons,
     }
@@ -1993,35 +2129,64 @@ with tab_stock:
 # --- TAB：庫存健康 ---
 with tab_holdings:
     st.subheader("🩺 庫存健康檢查")
-    st.caption("輸入你實際持有的股票、股數與成本，一鍵檢查每一檔現在該停損、加碼、攤平還是出清。這份清單會存在本機，下次開啟自動帶回來。")
+    st.caption("輸入你實際持有的股票、股數與成本，AI 會依趨勢強度與波動度自動估算每一檔的動態停損防線與停利目標，一鍵檢查現在該停損、加碼、攤平還是出清。這份清單會存在本機，下次開啟自動帶回來。")
 
+    with st.expander("🤖 AI 怎麼算停損／停利？（不想手動猜百分比，直接看這裡）", expanded=False):
+        st.markdown("""
+- **停損防線是「動態」的，不是死板固定 %**：用「近期高點 − ATR（真實波動幅度）× 趨勢係數」跟「成本價 × 你的下限%」兩者取比較不吃虧的一個。
+  股票趨勢越強（ADX 越高），給的緩衝空間越大，避免正常回檔就被洗出場、錯過主升段；趨勢走弱或盤整時則自動收緊，虧損不會放給它擴大。
+- **停利目標用「風險倍數」動態算，不用你猜要設多少 %**：目標價會隨這檔股票自己的波動度自動放大縮小。到第一目標建議先落袋一小部分，到第二目標建議了結一半左右，**剩餘部位改用移動停損顧著就好、不用全部出清**——這是為了解決「賣飛」的問題。
+- **攤平只在條件仍偏多、且沒跌破 AI 停損防線時才會建議**，且會提醒「最多攤平一次、攤平後要重設停損」，避免掉進「無底洞式攤平」。
+- 以上全部是量化規則＋技術指標算出來的參考建議，**不是投資建議**，最終判斷跟資金控管仍要自己做。
+        """)
+
+    st.markdown("##### 持有部位")
     holdings_df = st.data_editor(
         st.session_state["holdings_editor"],
         num_rows="dynamic",
         hide_index=True,
         use_container_width=True,
         column_config={
-            "股票代碼": st.column_config.TextColumn("股票代碼", help="輸入 4 碼台股代號", max_chars=4),
-            "持有股數": st.column_config.NumberColumn("持有股數", min_value=0, step=1000),
-            "持有成本": st.column_config.NumberColumn("持有成本（每股）", min_value=0.0, step=0.1, format="%.2f"),
+            "股票代碼": st.column_config.TextColumn("股票代碼", help="輸入 4 碼台股代號", max_chars=4, width="small"),
+            "持有股數": st.column_config.NumberColumn("持有股數", help="總持有股數（不是張數）", min_value=0, step=1000, format="%d"),
+            "持有成本": st.column_config.NumberColumn("持有成本（每股）", help="平均持有成本，多次買進請自行加權平均", min_value=0.0, step=0.1, format="%.2f"),
         },
         key="holdings_editor_widget",
     )
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        stop_loss_pct = st.slider("停損門檻（%）", min_value=3, max_value=20, value=8,
-                                   help="未實現損益跌破這個百分比，就會被標記為「建議停損」。")
-    with c2:
-        take_profit_pct = st.slider("獲利了結參考線（%）", min_value=0, max_value=100, value=30,
-                                     help="搭配短線過熱訊號一起看，達到這個獲利幅度且過熱時，會提示可以考慮先了結一部分。0 = 不看獲利了結。")
-    with c3:
-        if st.button("💾 儲存這份庫存清單"):
+    st.markdown("##### 風險偏好")
+    st.caption("決定「成本下限」這條保底防線；真正的停損／停利價仍會依每檔股票當下的趨勢與波動度動態調整。")
+    profile_keys = list(RISK_PROFILE_PRESETS.keys())
+    chosen_profile = st.radio("風險偏好", profile_keys, index=1, horizontal=True,
+                               key="risk_profile_choice", label_visibility="collapsed")
+    rp_cols = st.columns(3)
+    for i, key in enumerate(profile_keys):
+        preset = RISK_PROFILE_PRESETS[key]
+        active_cls = "active" if key == chosen_profile else ""
+        icon = "🛡️" if key == "保守" else ("⚖️" if key == "平衡" else "🚀")
+        rp_cols[i].markdown(f"""
+<div class="risk-profile-card {active_cls}">
+    <div class="rp-title">{icon} {key}</div>
+    <div class="rp-desc">{preset['desc']}</div>
+    <div class="rp-num">成本下限 −{preset['base_stop_loss_pct']:.0f}%</div>
+</div>
+""", unsafe_allow_html=True)
+
+    stop_loss_pct = RISK_PROFILE_PRESETS[chosen_profile]["base_stop_loss_pct"]
+    with st.expander("⚙️ 進階：手動微調成本下限（一般不用調）", expanded=False):
+        stop_loss_pct = st.slider("成本下限（%）", min_value=3, max_value=25, value=int(stop_loss_pct),
+                                   help="未實現損益跌破這個百分比時，一定會被視為停損防線的下限，即使 AI 動態算出的緩衝更寬鬆也一樣。")
+
+    bcol1, bcol2 = st.columns([1, 1])
+    with bcol1:
+        run_check = st.button("🩺 開始健康檢查", type="primary", use_container_width=True)
+    with bcol2:
+        if st.button("💾 儲存這份庫存清單", use_container_width=True):
             save_holdings_to_disk(holdings_df)
             st.session_state["holdings_editor"] = holdings_df
             st.success("庫存清單已儲存到本機。")
 
-    if st.button("🩺 開始健康檢查", type="primary"):
+    if run_check:
         _clean_holdings = holdings_df.dropna(subset=["股票代碼"])
         _clean_holdings = _clean_holdings[_clean_holdings["股票代碼"].astype(str).str.strip() != ""]
         if _clean_holdings.empty:
@@ -2040,7 +2205,7 @@ with tab_holdings:
                         if stock_row is None:
                             results.append({"股票代碼": sid, "操作建議": "⚠️ 查無資料", "理由": ["抓不到這檔股票的資料，請確認代碼是否正確。"]})
                         else:
-                            r = evaluate_holding_action(stock_row, cost, shares, stop_loss_pct, take_profit_pct or None)
+                            r = evaluate_holding_action(stock_row, cost, shares, stop_loss_pct)
                             r["股票代碼"] = sid
                             results.append(r)
                     except Exception as exc:
@@ -2052,39 +2217,95 @@ with tab_holdings:
 
     if st.session_state.get("holdings_health_res"):
         results = st.session_state["holdings_health_res"]
-        action_order = {"🔻 建議停損": 0, "🚪 建議出清": 1, "🎯 可考慮部分獲利了結": 2, "➕ 可考慮攤平": 3,
-                         "📈 可考慮加碼": 4, "🤝 續抱觀察": 5, "⚠️ 資料不足": 6, "⚠️ 查無資料": 6, "⚠️ 檢查失敗": 6}
+        action_order = {"🔻 建議停損": 0, "🚪 建議出清": 1, "🎯 建議獲利了結一部分": 2, "🎯 可考慮部分獲利了結": 3,
+                         "➕ 可考慮攤平": 4, "📈 可考慮加碼": 5, "🤝 續抱觀察": 6,
+                         "⚠️ 資料不足": 7, "⚠️ 查無資料": 7, "⚠️ 檢查失敗": 7}
         results_sorted = sorted(results, key=lambda r: action_order.get(r.get("操作建議"), 9))
 
         n_stop = sum(1 for r in results if r.get("操作建議") in ("🔻 建議停損", "🚪 建議出清"))
+        n_profit = sum(1 for r in results if "獲利了結" in r.get("操作建議", ""))
         n_add = sum(1 for r in results if r.get("操作建議") in ("📈 可考慮加碼", "➕ 可考慮攤平"))
-        m1, m2, m3 = st.columns(3)
-        m1.metric("庫存檔數", len(results))
-        m2.metric("需要注意（停損／出清）", n_stop)
-        m3.metric("可考慮加碼／攤平", n_add)
+        conf_vals = [r.get("續抱信心分") for r in results if not pd.isna(r.get("續抱信心分", np.nan))]
+        avg_conf = f"{np.mean(conf_vals):.0f}" if conf_vals else "—"
 
-        st.divider()
-        for r in results_sorted:
-            action = r.get("操作建議", "")
-            border = "#ff453a" if "停損" in action or "出清" in action else \
-                     "#30d158" if "加碼" in action or "攤平" in action or "獲利了結" in action else \
-                     "var(--border-c)"
-            price_line = f"現價 {r['現價']:.2f}　" if not pd.isna(r.get("現價", np.nan)) else ""
-            pnl_line = f"損益 {r['損益%']:+.1f}%　" if not pd.isna(r.get("損益%", np.nan)) else ""
-            stop_line = f"參考停損價 {r['建議停損價']:.2f}" if not pd.isna(r.get("建議停損價", np.nan)) else ""
-            reasons_html = "".join(f"<li>{x}</li>" for x in r.get("理由", []))
-            st.markdown(f"""
-<div class="pick-card" style="border-left:3px solid {border}; padding:14px 16px; margin-bottom:10px; background:var(--bg-card); border-radius:10px;">
-    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
-        <div style="font-size:16px; font-weight:700;">{r.get('股票代碼','')} · {action}</div>
-        <div style="font-size:13px; color:var(--text-sub);">{price_line}{pnl_line}{stop_line}</div>
-    </div>
-    <ul style="margin:8px 0 0 18px; padding:0; font-size:13.5px; color:var(--text-sub); line-height:1.6;">
-        {reasons_html}
-    </ul>
+        st.markdown(f"""
+<div class="stat-chip-row">
+    <div class="stat-chip"><div class="sc-label">庫存檔數</div><div class="sc-value">{len(results)}</div></div>
+    <div class="stat-chip"><div class="sc-label">⚠️ 需要注意（停損／出清）</div><div class="sc-value" style="color:var(--accent-red);">{n_stop}</div></div>
+    <div class="stat-chip"><div class="sc-label">🎯 可考慮獲利了結</div><div class="sc-value" style="color:var(--accent-green);">{n_profit}</div></div>
+    <div class="stat-chip"><div class="sc-label">📈 可考慮加碼／攤平</div><div class="sc-value" style="color:var(--accent-blue);">{n_add}</div></div>
 </div>
 """, unsafe_allow_html=True)
-        st.caption("以上為規則式參考建議（依買進分、技術狀態、ATR 與你設定的停損／停利門檻計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
+
+        for r in results_sorted:
+            action = r.get("操作建議", "")
+            if "停損" in action or "出清" in action:
+                badge_bg, badge_border, badge_color = "rgba(255,69,58,0.15)", "var(--accent-red)", "var(--accent-red)"
+            elif "獲利了結" in action or "加碼" in action or "攤平" in action:
+                badge_bg, badge_border, badge_color = "rgba(48,209,88,0.15)", "var(--accent-green)", "var(--accent-green)"
+            elif "續抱" in action:
+                badge_bg, badge_border, badge_color = "rgba(10,132,255,0.15)", "var(--accent-blue)", "var(--accent-blue)"
+            else:
+                badge_bg, badge_border, badge_color = "rgba(255,214,10,0.15)", "var(--accent-yellow)", "var(--accent-yellow)"
+
+            price = r.get("現價", np.nan)
+            pnl = r.get("損益%", np.nan)
+            has_price = not pd.isna(price) if price is not None else False
+
+            meta_bits = []
+            if has_price:
+                meta_bits.append(f"現價 <b>{price:.2f}</b>")
+            if pnl is not None and not pd.isna(pnl):
+                pnl_color = "var(--accent-green)" if pnl >= 0 else "var(--accent-red)"
+                meta_bits.append(f"損益 <b style='color:{pnl_color};'>{pnl:+.1f}%</b>")
+            mv = r.get("市值", np.nan)
+            if mv is not None and not pd.isna(mv):
+                meta_bits.append(f"市值 <b>{mv:,.0f}</b>")
+            upl = r.get("未實現損益", np.nan)
+            if upl is not None and not pd.isna(upl):
+                upl_color = "var(--accent-green)" if upl >= 0 else "var(--accent-red)"
+                meta_bits.append(f"未實現損益 <b style='color:{upl_color};'>{upl:+,.0f}</b>")
+            meta_html = "　·　".join(meta_bits)
+
+            confidence = r.get("續抱信心分", np.nan)
+            confidence_html = ""
+            if confidence is not None and not pd.isna(confidence):
+                cf_color = "var(--accent-green)" if confidence >= 70 else ("var(--accent-yellow)" if confidence >= 40 else "var(--accent-red)")
+                confidence_html = f"""
+<div class="confidence-row">
+    <div class="confidence-label">續抱信心分</div>
+    <div class="confidence-track"><div class="confidence-fill" style="width:{confidence:.0f}%; background:{cf_color};"></div></div>
+    <div class="confidence-num" style="color:{cf_color};">{confidence:.0f}</div>
+</div>"""
+
+            targets_html = ""
+            stop_v, t1, t2 = r.get("建議停損價", np.nan), r.get("目標價1", np.nan), r.get("目標價2", np.nan)
+            if any(v is not None and not pd.isna(v) for v in [stop_v, t1, t2]):
+                def _box(label, v):
+                    val_str = f"{v:.2f}" if (v is not None and not pd.isna(v)) else "—"
+                    return f'<div class="price-target-box"><div class="pt-label">{label}</div><div class="pt-value">{val_str}</div></div>'
+                targets_html = f"""
+<div class="price-target-row">
+    {_box("🛑 AI 停損防線", stop_v)}
+    {_box("🎯 目標價 1（1.5R）", t1)}
+    {_box("🎯 目標價 2（3R）", t2)}
+</div>"""
+
+            reasons_html = "".join(f"<li>{x}</li>" for x in r.get("理由", []))
+
+            st.markdown(f"""
+<div class="holding-card">
+    <div class="hc-top">
+        <div class="hc-name">{r.get('股票代碼','')}<span class="hc-badge" style="background:{badge_bg}; border-color:{badge_border}; color:{badge_color};">{action}</span></div>
+    </div>
+    <div class="hc-meta">{meta_html}</div>
+    {confidence_html}
+    {targets_html}
+    <ul class="hc-reasons">{reasons_html}</ul>
+</div>
+""", unsafe_allow_html=True)
+
+        st.caption("以上為量化規則參考建議（依買進分、趨勢強度 ADX、波動度 ATR 與你選擇的風險偏好動態計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
 
 with tab_verify:
     st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
