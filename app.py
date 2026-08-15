@@ -2716,8 +2716,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_help, tab_settings = st.tabs([
-    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "🏆 AI戰績", "📖 使用說明", "⚙️ 系統設定"
+tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_advanced, tab_help, tab_settings = st.tabs([
+    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "🏆 AI戰績", "🔬 進階研究工具（研究用途）", "📖 使用說明", "⚙️ 系統設定"
 ])
 
 # --- TAB：使用說明 ---
@@ -3501,9 +3501,27 @@ with tab_holdings:
         st.caption("以上為量化規則參考建議（依買進分、趨勢強度 ADX、波動度 ATR 與你選擇的風險偏好動態計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
 
 with tab_verify:
-    st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
-    sub_year, sub_week, sub_single, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬(專家)", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
+    st.subheader("🏆 AI戰績")
+    st.caption("AI戰績自動更新：不需要手動建立校準，系統會在開啟時更新歷史訊號表現。")
+    log = load_research_log()
+    if log.empty:
+        st.info("尚未累積每日訊號快照。請先執行盤後深度掃描，系統會自動建立 AI 戰績資料。")
+    else:
+        max_samples = min(500, max(50, len(log)))
+        cal = st.session_state.get("calibration_table", pd.DataFrame())
+        detail = st.session_state.get("calibration_detail", pd.DataFrame())
+        if cal is None or cal.empty:
+            with st.status("🤖 AI戰績自動更新中…", expanded=False):
+                detail, cal = build_forward_calibration(log, max_samples=max_samples)
+                st.session_state["calibration_detail"] = detail
+                st.session_state["calibration_table"] = cal
+        if cal is not None and not cal.empty:
+            st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
+            st.caption(f"有效樣本 {len(detail):,} 筆；可靠度：{calibration_reliability(len(detail))}。")
 
+with tab_advanced:
+    st.warning("⚠️ 研究用途：以下工具提供給量化研究與策略驗證使用。一般投資決策不需要操作。AI戰績已自動更新，無需在此建立校準。")
+    sub_year, sub_week, sub_single, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬(專家)", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
     def build_equity_benchmark_figure(result, title="資產曲線 vs Benchmark"):
         eq = result.get("equity", pd.Series(dtype=float))
         fig = go.Figure()
@@ -3740,4 +3758,3 @@ with tab_verify:
 # footer
 st.divider()
 st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
-    
