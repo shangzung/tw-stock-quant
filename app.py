@@ -833,10 +833,12 @@ st.markdown("""
 # 1. API 與 Token 鎖定按鈕
 # =========================
 api = DataLoader()
+_FINMIND_THREAD_LOCAL = threading.local()
 
 # Token／API 設定的輸入元件移到「⚙️ 系統設定」分頁（見下方 render_settings_tab），
 # 這裡只用 session_state 裡已套用的值做登入，讓一般使用者不必在主畫面看到這些研究員參數。
 active_token = st.session_state["token_applied"]
+_ACTIVE_FINMIND_TOKEN = active_token
 
 if active_token:
     try:
@@ -853,6 +855,27 @@ else:
             _token_status = ("warning", "⚠️ 使用免費額度")
     except Exception:
         _token_status = ("warning", "⚠️ 使用免費額度")
+
+def get_finmind_api():
+    """每個 worker thread 使用自己的 DataLoader，避免多執行緒共用同一個 client。
+    這是 V10 盤後掃描的重要穩定性修正：原本 18 檔同時分析時，共用 DataLoader
+    可能造成請求互相干擾，最後全部回傳空資料。"""
+    client = getattr(_FINMIND_THREAD_LOCAL, "client", None)
+    if client is None:
+        client = DataLoader()
+        token = _ACTIVE_FINMIND_TOKEN
+        if not token:
+            try:
+                token = st.secrets.get("FINMIND_TOKEN", "")
+            except Exception:
+                token = ""
+        if token:
+            try:
+                client.login_by_token(api_token=token)
+            except Exception:
+                pass
+        _FINMIND_THREAD_LOCAL.client = client
+    return client
 
 def has_finmind_secret():
     """安全檢查是否設定了 FINMIND_TOKEN。
@@ -1170,7 +1193,7 @@ def _get_daily_cached(stock_id, days):
     """
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     # ✅ 使用正確的 API 名稱: taiwan_stock_daily
-    df = api.taiwan_stock_daily(stock_id=stock_id, start_date=start)
+    df = get_finmind_api().taiwan_stock_daily(stock_id=stock_id, start_date=start)
     throttle()
     if df is None or df.empty:
         raise ValueError("taiwan_stock_daily 回傳空資料")
@@ -1192,7 +1215,7 @@ def get_daily(stock_id, days=500):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _get_stock_universe_cached():
-    info = api.taiwan_stock_info()
+    info = get_finmind_api().taiwan_stock_info()
     throttle()
     if info is None or info.empty:
         raise ValueError("taiwan_stock_info 回傳空資料")
@@ -1217,7 +1240,7 @@ def get_stock_universe():
 @st.cache_data(ttl=EOD_CACHE_TTL, show_spinner=False)
 def _get_revenue_cached(stock_id, days):
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    df = api.taiwan_stock_month_revenue(stock_id=stock_id, start_date=start)
+    df = get_finmind_api().taiwan_stock_month_revenue(stock_id=stock_id, start_date=start)
     throttle()
     if df is None or df.empty:
         raise ValueError("taiwan_stock_month_revenue 回傳空資料")
@@ -1237,7 +1260,7 @@ def get_revenue(stock_id, days=1000):
 def _get_financial_cached(stock_id, days):
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     # ✅ 使用正確的 API 名稱: taiwan_stock_financial_statement
-    df = api.taiwan_stock_financial_statement(stock_id=stock_id, start_date=start)
+    df = get_finmind_api().taiwan_stock_financial_statement(stock_id=stock_id, start_date=start)
     throttle()
     if df is None or df.empty:
         raise ValueError("taiwan_stock_financial_statement 回傳空資料")
@@ -1255,7 +1278,7 @@ def get_financial(stock_id, days=1500):
 @st.cache_data(ttl=EOD_CACHE_TTL, show_spinner=False)
 def _get_per_pbr_cached(stock_id, days):
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    df = api.taiwan_stock_per_pbr(stock_id=stock_id, start_date=start)
+    df = get_finmind_api().taiwan_stock_per_pbr(stock_id=stock_id, start_date=start)
     throttle()
     if df is None or df.empty:
         raise ValueError("taiwan_stock_per_pbr 回傳空資料")
@@ -1274,7 +1297,7 @@ def get_per_pbr(stock_id, days=1500):
 @st.cache_data(ttl=EOD_CACHE_TTL, show_spinner=False)
 def _get_institutional_cached(stock_id, days):
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    df = api.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start)
+    df = get_finmind_api().taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start)
     throttle()
     if df is None or df.empty:
         raise ValueError("taiwan_stock_institutional_investors 回傳空資料")
@@ -1790,17 +1813,22 @@ def market_prefilter(stock_id):
 
 
 SCAN_STRENGTH_CONFIG = {
-    # prefilter 檔數 + topk*5（完整分析每檔要打 5 支 FinMind API）＝這一輪大約會消耗的
-    # FinMind 額度。FinMind 免費額度是「未登入 300 次/hr、免費註冊後 600 次/hr」，
-    # 所以：
-    #   ⚡ 快速：150+12*5=210 次 → 未登入也跑得完
-    #   🎯 標準：400+18*5=490 次 → 需要在「⚙️ 系統設定」套用免費 FinMind token（600次/hr）
-    #   🔬 深度：全市場（約 1700+ 檔）→ 一小時內一定跑不完，只建議在額度重置後分批跑，
-    #            或是升級付費方案
+    # 盤後 shortlist 的完整研究現在採「批次 API」：
+    # 初篩仍是每檔日 K；完整研究約 5 個 batch request，而不是 topk×5。
     "⚡ 快速": {"prefilter": 150, "topk": 12},
     "🎯 標準": {"prefilter": 400, "topk": 18},
-    "🔬 深度": {"prefilter": None, "topk": 25},  # None = 全市場，不做人數上限
+    "🔬 深度": {"prefilter": None, "topk": 25},
 }
+
+def effective_scan_config(strength_label):
+    """依是否有 Token 自動避免免費額度被 400 檔初篩吃光。"""
+    cfg = dict(SCAN_STRENGTH_CONFIG[strength_label])
+    if not active_token and not has_finmind_secret():
+        if strength_label == "🎯 標準":
+            cfg.update({"prefilter": 240, "topk": 12})
+        elif strength_label == "🔬 深度":
+            cfg.update({"prefilter": 240, "topk": 12})
+    return cfg
 
 
 def build_scan_list(uni_df, strength_label, seed=None):
@@ -1816,7 +1844,7 @@ def build_scan_list(uni_df, strength_label, seed=None):
        均勻隨機取樣』的作法，行為與舊版一致，不會讓掃描直接失敗。
     '深度' 模式直接掃描全市場，不取樣（不論用哪種排序都一樣是全部）。
     """
-    cfg = SCAN_STRENGTH_CONFIG[strength_label]
+    cfg = effective_scan_config(strength_label)
     all_ids = uni_df["stock_id"].tolist()
     if cfg["prefilter"] is None or cfg["prefilter"] >= len(all_ids):
         return all_ids
@@ -1963,6 +1991,74 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
     except Exception as e:
         _log_api_error("calculate_stock_snapshot", stock_id, e)
         return None
+
+
+def _normalize_batch_df(df, numeric_cols=()):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if "stock_id" in out.columns:
+        out["stock_id"] = out["stock_id"].astype(str)
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    for c in numeric_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    return out
+
+def prepare_pit_sources_batch(stock_ids, daily_days=1500):
+    """盤後完整分析的批次資料抓取。
+
+    針對 shortlist 一次抓 5 個 dataset，再依 stock_id 切回個股。
+    FinMind DataLoader 支援 stock_id_list，因此 18 檔完整分析不再變成 18×5 次 API；
+    這同時降低 Token 消耗，也避免多執行緒同時轟 API。
+    若某一個批次 dataset 失敗，只讓該 dataset 為空，不影響其他資料繼續分析。
+    """
+    ids = [str(x) for x in dict.fromkeys(stock_ids) if str(x)]
+    if not ids:
+        return {}
+    client = get_finmind_api()
+    start_daily = (datetime.now() - timedelta(days=daily_days)).strftime("%Y-%m-%d")
+    starts = {
+        "revenue": (datetime.now() - timedelta(days=1800)).strftime("%Y-%m-%d"),
+        "financial": (datetime.now() - timedelta(days=2400)).strftime("%Y-%m-%d"),
+        "per_pbr": (datetime.now() - timedelta(days=1800)).strftime("%Y-%m-%d"),
+        "institutional": (datetime.now() - timedelta(days=600)).strftime("%Y-%m-%d"),
+    }
+    calls = [
+        ("daily", lambda: client.taiwan_stock_daily(stock_id_list=ids, start_date=start_daily), ["close","open","max","min","Trading_turnover","Trading_Volume","Trading_money"]),
+        ("revenue", lambda: client.taiwan_stock_month_revenue(stock_id_list=ids, start_date=starts["revenue"]), ["revenue","revenue_year_on_year","revenue_month_on_month"]),
+        ("financial", lambda: client.taiwan_stock_financial_statement(stock_id_list=ids, start_date=starts["financial"]), ["value"]),
+        ("per_pbr", lambda: client.taiwan_stock_per_pbr(stock_id_list=ids, start_date=starts["per_pbr"]), ["PER","PBR","dividend_yield"]),
+        ("institutional", lambda: client.taiwan_stock_institutional_investors(stock_id_list=ids, start_date=starts["institutional"]), ["buy","sell"]),
+    ]
+    raw = {}
+    for name, fn, numeric in calls:
+        try:
+            df = fn()
+            throttle()
+            if df is None or df.empty:
+                raw[name] = pd.DataFrame()
+                _log_api_error(f"batch_{name}", ",".join(ids[:8]), ValueError("批次 API 回傳空資料"))
+            else:
+                raw[name] = _normalize_batch_df(df, numeric)
+                if name == "daily":
+                    if "Trading_Volume" in raw[name].columns:
+                        raw[name]["volume"] = pd.to_numeric(raw[name]["Trading_Volume"], errors="coerce")
+                    elif "Trading_volume" in raw[name].columns:
+                        raw[name]["volume"] = pd.to_numeric(raw[name]["Trading_volume"], errors="coerce")
+        except Exception as e:
+            raw[name] = pd.DataFrame()
+            _log_api_error(f"batch_{name}", ",".join(ids[:8]), e)
+
+    result = {sid: {} for sid in ids}
+    for sid in ids:
+        for name, df in raw.items():
+            if df.empty or "stock_id" not in df.columns:
+                result[sid][name] = pd.DataFrame()
+            else:
+                result[sid][name] = df[df["stock_id"].astype(str) == sid].copy().sort_values("date").reset_index(drop=True)
+    return result
 
 
 def calculate_stock_at(stock_id, regime_tag, regime_dict, as_of_idx=None, as_of_date=None):
@@ -2492,9 +2588,99 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_settings = st.tabs([
-    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "⚙️ 系統設定"
+tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_help, tab_settings = st.tabs([
+    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "📖 使用說明", "⚙️ 系統設定"
 ])
+
+# --- TAB：使用說明 ---
+with tab_help:
+    st.subheader("📖 Quant Compass V10 使用說明")
+    st.caption("給第一次使用的人：不用懂量化，也能知道這個系統在做什麼、什麼時候按哪個按鈕。")
+
+    st.markdown("""
+    <div class="terminal-grid">
+      <div class="terminal-card"><div class="tc-label">你可以把它想成</div><div class="tc-value">台股研究助理</div><div class="tc-sub">每天幫你從市場找出值得研究的股票，不直接替你下單。</div></div>
+      <div class="terminal-card"><div class="tc-label">主要問題</div><div class="tc-value">今天看誰？</div><div class="tc-sub">盤後找明日名單，盤中確認市場真的有沒有動能。</div></div>
+      <div class="terminal-card"><div class="tc-label">核心分數</div><div class="tc-value">買進分</div><div class="tc-sub">越高代表目前條件越完整；不是勝率，也不是保證獲利。</div></div>
+      <div class="terminal-card"><div class="tc-label">資料原則</div><div class="tc-value">PIT</div><div class="tc-sub">歷史驗證不使用當時尚未知道的未來資料。</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("🧭 第一步：每天晚上要做什麼？", expanded=True):
+        st.markdown("""
+        **按「🌙 盤後深度」→「執行盤後深度掃描」**
+
+        系統會依序做：
+        1. 從上市＋上櫃股票中建立掃描清單。
+        2. 先看流動性與技術條件，避免把 FinMind 額度浪費在冷門股票。
+        3. 從候選股中挑出前段班。
+        4. 一次批次抓基本面、營收、估值、法人與日 K。
+        5. 用同一套「買進分」排序。
+        6. 產生「明日最值得看」與「明日可優先研究」名單。
+
+        **簡單說：晚上是在回答「明天有哪些股票值得我看？」**
+        """)
+
+    with st.expander("⚡ 第二步：隔天盤中要做什麼？"):
+        st.markdown("""
+        **按「⚡ 盤中即時」→「一鍵掃描現在市場」**。
+
+        盤中主要看即時行情、成交量、漲跌與動能，並套用昨晚留下的研究結果。
+        它的目的不是重新做一遍財報研究，而是回答：
+
+        **「昨晚看好的股票，今天市場真的有沒有在買？」**
+
+        盤中模式原則上不重新打完整 FinMind 研究資料，所以可以比盤後更頻繁使用。
+        """)
+
+    with st.expander("🧠 第三步：買進分到底是什麼？"):
+        st.markdown("""
+        買進分是把多個條件整理成一個容易排序的分數，包含：
+
+        **基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境**。
+
+        例如 90 分代表「目前條件整體很強」，80 分代表「條件也不錯」，但**90 分不是 90% 勝率**。
+        所以實際操作還要一起看：**風險、資料品質、狀態、是否過熱、是否接近漲停**。
+        """)
+
+    with st.expander("🎨 第四步：台股顏色怎麼看？"):
+        st.markdown("""
+        **價格／報酬：** 🔴 紅色＝上漲、🟢 綠色＝下跌、⚪ 灰色＝平盤。
+
+        **決策：** 🟢 可買、🟡 觀察、🔴 不買。
+
+        **風險：** 🟢 低風險、🟡 中風險、🔴 高風險。
+
+        所以看到紅色時，要先看它是「價格上漲」還是「高風險」；兩者的意義不同。
+        """)
+
+    with st.expander("⚠️ 第五步：看到『可買』是不是就一定要買？"):
+        st.markdown("""
+        **不是。**「可買」代表模型認為條件同時成立的程度較高，不代表未來一定上漲。
+
+        實戰建議依序確認：
+        **買進分 → 風險 → 資料品質 → 是否過熱 → 盤中動能 → 最後才由你決定是否下單。**
+
+        這套系統目前定位是**量化研究與交易決策輔助**，不是自動下單機器人。
+        """)
+
+    with st.expander("🔑 FinMind Token 是做什麼？怎麼省？"):
+        st.markdown("""
+        FinMind 主要負責盤後研究資料，例如日 K、營收、財報、PER/PBR、法人資料。
+
+        V10 已經把盤後完整研究改成**批次抓取**：候選股票的完整資料一次分批取得，再逐檔計算分數，避免以前每一檔股票重複打 5 個 API。
+
+        **建議：**有 Token 就放在「⚙️ 系統設定」；盤中掃描則盡量不消耗 FinMind。
+        """)
+
+    with st.expander("📊 最後：這個系統每天真正要看的只有什麼？"):
+        st.markdown("""
+        如果你不想看一堆數字，只看這 6 個：
+
+        **① 買進分　② 狀態　③ 風險　④ 資料品質　⑤ 近 1／5／20 日漲跌　⑥ 盤中動能**
+
+        其他指標都是「需要深入研究時再打開」。
+        """)
 
 # --- TAB：系統設定（程式碼故意寫在最前面執行，讓改設定當下就對其他分頁生效，
 #     即使它在畫面上排在最後一個分頁也一樣）---
@@ -2510,7 +2696,8 @@ with tab_settings:
         * **買進分是唯一的主分數。** 綜合分、起漲分等內部因子仍在計算，但只出現在「股票分析」的詳細分析裡，不會同時丟兩個分數給你。
         * **雙掃描器。** 盤中即時與盤後深度共用同一套核心研究引擎，但資料層分開；盤中優先 0 FinMind，盤後才做完整深度分析。
         * **全市場掃描是真的全市場。** 不再是股票代碼排序後直接切前 N 檔；優先用交易所官方 OpenAPI 的「今日全市場成交金額」快照（免費、不吃 FinMind 額度）排出最活躍的候選名單，抓不到快照時才退回全市場均勻隨機取樣。
-        * **FinMind 額度更省。** 日K／營收／財報／PER/PBR／法人買賣的快取從 30 分鐘拉長到 6 小時（這些資料本來就是收盤後才更新一次），同一天內重複操作不會重複扣額度；「系統設定」也會顯示這一小時已用掉多少次。
+        * **FinMind 額度更省。** 初篩後的完整研究改成批次抓取 5 個 dataset，不再每檔股票重打 5 次；日K／營收／財報／PER/PBR／法人買賣也保留快取。
+        * **盤後更穩。** 多檔分析不再共用同一個 DataLoader；每個 worker 使用獨立 client，降低「18/18 分析完成但全部沒有有效資料」的情況。
         * **一週實測驗證的是買進分本身**，用一模一樣的公式與門檻回推歷史訊號，不是另一套簡化規則。
         * **狀態標籤**（🟢低位起漲／🟢趨勢發動／🟡強勢追蹤／🟠短線過熱／🔴趨勢轉弱）取代單純的「過熱：是/否」，強勢和過熱不是同一件事。
         * **風險分獨立於買進分。** 買進分回答「條件強不強」，風險分回答「看錯了代價多大」。
@@ -2661,19 +2848,19 @@ with tab_eod:
         elif market_choice == "🏬 僅上櫃": uni = universe_df[universe_df["type"].str.lower() == "tpex"]
         else: uni = universe_df
 
-        cfg = SCAN_STRENGTH_CONFIG[strength_choice]
+        cfg = effective_scan_config(strength_choice)
         scan_size = len(uni) if cfg["prefilter"] is None else min(cfg["prefilter"], len(uni))
-        est_calls = scan_size + cfg["topk"] * 5
-        st.caption(f"「{strength_choice}」盤後約掃描 {scan_size} 檔（優先取今日成交金額最高的股票，抓不到今日快照時才退回全市場隨機取樣），"
-                   f"通過流動性/資料完整性門檻的才進入技術初篩，再取前 {cfg['topk']} 檔做完整分析。")
+        # 初篩每檔 1 次日 K；完整 shortlist 改成 5 個批次 dataset request。
+        est_calls = scan_size + 5
+        st.caption(f"「{strength_choice}」盤後先掃約 {scan_size} 檔，再取前 {cfg['topk']} 檔做完整分析；"
+                   f"完整分析改用 5 個批次資料請求，不再逐檔重打 5 次 FinMind。")
 
         _quota_limit = 600 if st.session_state.get("token_applied") or has_finmind_secret() else 300
         if est_calls > _quota_limit:
-            st.warning(f"⚠️ 這一輪預估會用掉約 {est_calls} 次 FinMind 額度，"
-                       f"超過目前每小時上限（{_quota_limit} 次）。如果掃到一半失敗，"
-                       f"可以改選較低的掃描強度，或到「⚙️ 系統設定」填入免費 FinMind token 把上限提高到 600 次/hr。")
+            st.warning(f"⚠️ 預估本次約 {est_calls} 次 FinMind 請求，超過目前上限 {_quota_limit}。"
+                       f"系統已自動限制無 Token 模式的標準/深度掃描；如需完整 400 檔初篩，請到「⚙️ 系統設定」套用 Token。")
         else:
-            st.caption(f"（預估這一輪約消耗 {est_calls} 次 FinMind 額度，目前每小時上限 {_quota_limit} 次，足夠跑完。）")
+            st.caption(f"（預估約 {est_calls} 次 API；完整分析採批次抓取，Token 消耗比舊版大幅降低。）")
 
         if st.button("🌙 執行盤後深度掃描", type="primary"):
             scan_list = build_scan_list(uni, strength_choice)
@@ -2701,22 +2888,27 @@ with tab_eod:
                     st.caption(f"流動性過濾後剩 {len(pre_df)} / {len(scan_list)} 檔值得繼續分析。")
                     shortlist = pre_df.head(cfg["topk"])["股票代碼"].tolist()
                     final_rows = []
+                    # ★ V10.1 穩定性修正：先一次批次抓完整研究資料，再逐檔使用同一個核心評分引擎。
+                    with st.status(f"🧠 批次研究資料中… 0/5", expanded=False) as final_status:
+                        batch_sources = prepare_pit_sources_batch(shortlist, 1500)
+                        final_status.update(label="🧠 批次研究資料完成… 5/5")
+                    _flush_api_errors()
+
                     with st.status(f"🧠 完整分析中… 0/{len(shortlist)}", expanded=False) as final_status:
-                        def _calc_one(sid):
-                            return calculate_stock(sid, regime["regime"], regime)
-                        with ThreadPoolExecutor(max_workers=max(1, min(scan_workers, len(shortlist)))) as pool:
-                            futures = {pool.submit(_calc_one, sid): sid for sid in shortlist}
-                            done = 0
-                            for future in as_completed(futures):
-                                sid = futures[future]; done += 1
-                                try:
-                                    result = future.result()
-                                    if result: final_rows.append(result)
-                                    else: st.toast(f"⚠️ {sid} 資料不足或分析失敗", icon="⚠️")
-                                except Exception as exc:
-                                    _log_api_error("calculate_stock", sid, exc)
-                                    st.toast(f"⚠️ {sid} 資料抓取失敗", icon="⚠️")
-                                final_status.update(label=f"🧠 完整分析中… {done}/{len(shortlist)}")
+                        for done, sid in enumerate(shortlist, start=1):
+                            try:
+                                sources = batch_sources.get(sid, {})
+                                if not sources.get("daily", pd.DataFrame()).empty:
+                                    result = calculate_stock_snapshot(sid, pd.Timestamp(datetime.now().date()), sources, regime)
+                                else:
+                                    result = None
+                                if result:
+                                    final_rows.append(result)
+                                else:
+                                    st.toast(f"⚠️ {sid} 無法產生完整分數，請看 API 診斷", icon="⚠️")
+                            except Exception as exc:
+                                _log_api_error("calculate_stock_snapshot", sid, exc)
+                            final_status.update(label=f"🧠 完整分析中… {done}/{len(shortlist)}")
                     _flush_api_errors()
 
                     if final_rows:
