@@ -1,5 +1,5 @@
 # app.py
-# 台股 V9.0 研究級量化決策 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
+# 台股 V10.0 Smart Real-Time Scanner：盤中即時 + 盤後深度 + PIT 回測 + 統一買進分 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -46,7 +46,7 @@ HOLDINGS_FILE = CACHE_DIR / "holdings.json"
 
 
 # =========================
-# V9.0 Strategy Validation Engine
+# V10.0 Strategy Validation Engine
 # =========================
 RESEARCH_LOG_FILE = CACHE_DIR / "research_signal_log.jsonl"
 CALIBRATION_CACHE_FILE = CACHE_DIR / "calibration_result.pkl"
@@ -216,7 +216,7 @@ def clear_saved_token():
 
 
 def load_saved_scan():
-    """開啟 App 時，把上次留下來的掃描結果讀回來，直到下一次按『開始今日掃描』才會被覆蓋掉。"""
+    """開啟 App 時，把上次留下來的掃描結果讀回來，直到下一次執行盤後深度掃描才會被覆蓋掉。"""
     try:
         if SCAN_CACHE_FILE.exists():
             return pd.read_pickle(SCAN_CACHE_FILE)
@@ -324,7 +324,7 @@ if "market_scan_candidates" not in st.session_state: st.session_state["market_sc
 if "market_scan_top5" not in st.session_state: st.session_state["market_scan_top5"] = None
 if "market_scan_saved_at" not in st.session_state: st.session_state["market_scan_saved_at"] = None
 if st.session_state["market_scan_out"] is None:
-    # App 重開後，先把上次留下的掃描結果讀回來，直到下一次按下「開始今日掃描」才會被洗掉。
+    # App 重開後，先把上次留下的掃描結果讀回來，直到下一次執行盤後深度掃描才會被洗掉。
     _saved_scan = load_saved_scan()
     if _saved_scan:
         st.session_state["market_scan_out"] = _saved_scan.get("out")
@@ -822,6 +822,21 @@ def parallel_map(items, fn, max_workers=3):
 # 快取，不會再打 API；如果懷疑資料真的過期，仍可在「⚙️ 系統設定」按「清除快取」強制重抓。
 EOD_CACHE_TTL = 21600
 
+# =========================
+# V10.0 Smart Scanner：資料分層政策
+# 盤中掃描只使用交易所快照 + 已快取的盤後研究結果，原則上 0 FinMind。
+# 盤後深度掃描使用 V10 核心研究引擎；盤中只做即時行情調整，不複製另一套基本面評分。
+# =========================
+INTRADAY_CACHE_TTL = 15
+INTRADAY_TOP_N = 30
+INTRADAY_BASE_WEIGHT = 0.70
+INTRADAY_MOMENTUM_WEIGHT = 0.30
+INTRADAY_SCAN_MIN_TURNOVER = 50_000_000
+INTRADAY_TWSE_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=json&type=ALLBUT0999"
+INTRADAY_TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+INTRADAY_SCAN_CACHE_FILE = CACHE_DIR / "intraday_scan.pkl"
+EOD_SCAN_CACHE_FILE = CACHE_DIR / "eod_scan.pkl"
+
 if "api_errors" not in st.session_state:
     st.session_state["api_errors"] = []
 
@@ -1189,6 +1204,111 @@ def get_benchmarks():
     if not twii.empty: out["^TWII"]=twii.set_index("date")["close"]
     if not etf.empty: out["0050.TW"]=etf.set_index("date")["close"]
     return out
+
+# =========================
+# V10.0 盤中即時資料層：不碰 FinMind
+# =========================
+def _num(v):
+    return pd.to_numeric(pd.Series([v]).astype(str).str.replace(",", "", regex=False).str.replace("--", "", regex=False), errors="coerce").iloc[0]
+
+def _normalize_intraday_frame(df, source):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    id_col = _pick_col(df, ["證券代號", "SecuritiesCompanyCode", "Code", "代號"])
+    name_col = _pick_col(df, ["證券名稱", "SecuritiesCompanyName", "名稱"])
+    price_col = _pick_col(df, ["成交價", "成交價格", "Close", "close", "最後成交價", "收盤價"])
+    change_col = _pick_col(df, ["漲跌價差", "漲跌", "Change", "change"])
+    pct_col = _pick_col(df, ["漲跌幅", "漲跌幅%", "ChangePercent", "change_percent"])
+    vol_col = _pick_col(df, ["成交股數", "成交量", "TradingVolume", "Volume", "volume"])
+    turnover_col = _pick_col(df, ["成交金額", "成交額", "TradingValue", "TradeValue", "today_turnover"])
+    if not id_col:
+        return pd.DataFrame()
+    out = pd.DataFrame({"股票代碼": df[id_col].astype(str).str.strip().str.replace(".0", "", regex=False)})
+    out = out[out["股票代碼"].str.match(r"^\d{4}$", na=False)].copy()
+    if name_col: out["名稱"] = df.loc[out.index, name_col].astype(str).values
+    if price_col: out["即時價"] = df.loc[out.index, price_col].map(_num).values
+    if change_col: out["漲跌"] = df.loc[out.index, change_col].map(_num).values
+    if pct_col: out["即時漲跌%"] = df.loc[out.index, pct_col].map(_num).values
+    if vol_col: out["成交量"] = df.loc[out.index, vol_col].map(_num).values
+    if turnover_col: out["成交金額"] = df.loc[out.index, turnover_col].map(_num).values
+    out["來源"] = source
+    return out.reset_index(drop=True)
+
+@st.cache_data(ttl=INTRADAY_CACHE_TTL, show_spinner=False)
+def get_intraday_market_snapshot():
+    frames = []
+    try:
+        r = requests.get(INTRADAY_TWSE_URL, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        payload = r.json()
+        tables = payload.get("tables", []) if isinstance(payload, dict) else []
+        for table in tables:
+            fields, data = table.get("fields"), table.get("data")
+            if fields and data:
+                fdf = pd.DataFrame(data, columns=fields)
+                n = _normalize_intraday_frame(fdf, "TWSE")
+                if not n.empty: frames.append(n)
+    except Exception as e:
+        _log_api_error("TWSE intraday snapshot", "-", e)
+    try:
+        r = requests.get(INTRADAY_TPEX_URL, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        payload = r.json()
+        tdf = pd.DataFrame(payload if isinstance(payload, list) else payload.get("data", []))
+        n = _normalize_intraday_frame(tdf, "TPEx")
+        if not n.empty: frames.append(n)
+    except Exception as e:
+        _log_api_error("TPEx intraday snapshot", "-", e)
+    if not frames:
+        raise ValueError("交易所盤中快照無有效資料")
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates("股票代碼", keep="first")
+    for c in ["即時價", "漲跌", "即時漲跌%", "成交量", "成交金額"]:
+        if c not in out: out[c] = np.nan
+    return out
+
+def _intraday_score(row):
+    pct = safe_float(row.get("即時漲跌%"), 0)
+    turnover = safe_float(row.get("成交金額"), 0)
+    score = 50.0
+    score += clamp(pct * 6, -30, 30)
+    if turnover >= 1_000_000_000: score += 12
+    elif turnover >= 500_000_000: score += 8
+    elif turnover >= 100_000_000: score += 4
+    return clamp(score)
+
+def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N):
+    snap = get_intraday_market_snapshot()
+    if snap.empty: return pd.DataFrame()
+    uni = universe_df[[c for c in ["stock_id", "stock_name", "type"] if c in universe_df.columns]].copy()
+    uni = uni.rename(columns={"stock_id":"股票代碼", "stock_name":"名稱"})
+    out = uni.merge(snap, on="股票代碼", how="inner", suffixes=("", "_snap"))
+    out["成交金額"] = pd.to_numeric(out["成交金額"], errors="coerce").fillna(0)
+    out = out[out["成交金額"] >= INTRADAY_SCAN_MIN_TURNOVER].copy()
+    if out.empty: return out
+    out["盤中動能分"] = out.apply(_intraday_score, axis=1)
+    saved = load_saved_scan()
+    if isinstance(saved, dict) and isinstance(saved.get("out"), pd.DataFrame) and not saved["out"].empty:
+        base = saved["out"][[c for c in ["股票代碼", "買進分", "風險", "狀態", "決策"] if c in saved["out"].columns]].drop_duplicates("股票代碼")
+        out = out.merge(base, on="股票代碼", how="left")
+    out["基準買進分"] = pd.to_numeric(out.get("買進分"), errors="coerce")
+    out["基準買進分"] = out["基準買進分"].fillna(50)
+    out["即時調整分"] = (out["基準買進分"] * INTRADAY_BASE_WEIGHT + out["盤中動能分"] * INTRADAY_MOMENTUM_WEIGHT).round(1)
+    out["盤中訊號"] = np.select([out["即時漲跌%"] >= 5, out["即時漲跌%"] >= 2, out["即時漲跌%"] <= -3], ["🔥 強勢放量", "🟢 盤中轉強", "🔴 盤中轉弱"], default="🟡 中性")
+    out = out.sort_values(["即時調整分", "成交金額"], ascending=[False, False]).head(top_n).reset_index(drop=True)
+    out.insert(0, "排名", np.arange(1, len(out)+1))
+    return out
+
+def save_intraday_scan(df):
+    try:
+        pd.to_pickle({"out": df, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, INTRADAY_SCAN_CACHE_FILE)
+    except Exception: pass
+
+def load_intraday_scan():
+    try:
+        return pd.read_pickle(INTRADAY_SCAN_CACHE_FILE)
+    except Exception:
+        return None
 
 # =========================
 # 3b. 交易所官方 OpenAPI（免費、免 token、無額度限制）：全市場今日成交快照
@@ -2111,7 +2231,7 @@ st.sidebar.caption("Token、API 診斷、回測費率等研究員參數請至「
 
 def render_settings_tab():
     """把 Token / API 診斷 / 回測費率／投組持股數 全部集中在這一個分頁，
-    一般使用者完全不需要打開就能用『今日選股』。"""
+    一般使用者完全不需要打開設定頁；日常只要使用「盤中即時」或「盤後深度」。"""
     st.subheader("🔑 FinMind Token")
     st.caption("免費註冊 FinMind 帳號即可取得 Token，額度會從 300 次/hr 提高到 600 次/hr。輸入後按下方按鈕套用並儲存到本機，下次開啟 App 會自動帶入。若要部署到雲端，請改用 secrets，不要把 Token 寫進程式碼或 Git。")
     st.markdown("🔗 [前往 FinMind 官網免費註冊 / 索取 Token](https://finmindtrade.com/analysis/#/data/api_token)")
@@ -2214,22 +2334,23 @@ def render_settings_tab():
 # =========================
 # 9. Tabs 顯示區（8 個分頁收斂成 4 個：今日選股 / 股票分析 / 歷史驗證 / 系統設定）
 # =========================
-tab_today, tab_stock, tab_holdings, tab_verify, tab_settings = st.tabs([
-    "🔥 今日選股", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "⚙️ 系統設定"
+tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_settings = st.tabs([
+    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "⚙️ 系統設定"
 ])
 
 # --- TAB：系統設定（程式碼故意寫在最前面執行，讓改設定當下就對其他分頁生效，
 #     即使它在畫面上排在最後一個分頁也一樣）---
 with tab_settings:
     st.subheader("⚙️ 系統設定")
-    st.caption("Token、API 診斷、回測費率、投組持股數，都集中在這裡——不影響「今日選股」的日常使用。")
+    st.caption("Token、API 診斷、回測費率、投組持股數，都集中在這裡——不影響「盤中即時／盤後深度」的日常使用。")
     render_settings_tab()
 
     st.divider()
     with st.expander("📖 系統說明"):
         st.markdown("""
-        **這一版的重點：**
+        **V10.0 最終版重點：**
         * **買進分是唯一的主分數。** 綜合分、起漲分等內部因子仍在計算，但只出現在「股票分析」的詳細分析裡，不會同時丟兩個分數給你。
+        * **雙掃描器。** 盤中即時與盤後深度共用同一套核心研究引擎，但資料層分開；盤中優先 0 FinMind，盤後才做完整深度分析。
         * **全市場掃描是真的全市場。** 不再是股票代碼排序後直接切前 N 檔；優先用交易所官方 OpenAPI 的「今日全市場成交金額」快照（免費、不吃 FinMind 額度）排出最活躍的候選名單，抓不到快照時才退回全市場均勻隨機取樣。
         * **FinMind 額度更省。** 日K／營收／財報／PER/PBR／法人買賣的快取從 30 分鐘拉長到 6 小時（這些資料本來就是收盤後才更新一次），同一天內重複操作不會重複扣額度；「系統設定」也會顯示這一小時已用掉多少次。
         * **一週實測驗證的是買進分本身**，用一模一樣的公式與門檻回推歷史訊號，不是另一套簡化規則。
@@ -2316,8 +2437,48 @@ def show_scan_dataframe(df):
 
 MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "近1日漲跌%", "近5日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
 
-# --- TAB：今日選股 ---
-with tab_today:
+# --- TAB：盤中即時掃描 ---
+with tab_intraday:
+    st.subheader("⚡ 盤中即時掃描")
+    st.caption("盤中模式只讀交易所行情快照 + 已保存的盤後研究結果；原則上 0 FinMind Token。每次重新整理約 15 秒更新一次行情。")
+    u = get_stock_universe()
+    if u.empty:
+        st.error("無法取得股票清單，請到「⚙️ 系統設定」檢查 API。")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("市場股票", len(u))
+        cached_eod = load_saved_scan()
+        eod_time = cached_eod.get("saved_at", "尚無") if isinstance(cached_eod, dict) else "尚無"
+        c2.metric("最近盤後研究", eod_time)
+        c3.metric("FinMind 原則", "0 次")
+        if st.button("⚡ 一鍵掃描現在市場", type="primary"):
+            with st.spinner("連線交易所並掃描市場中…"):
+                try:
+                    live = run_intraday_scan(u, top_n=30)
+                    save_intraday_scan(live)
+                    st.session_state["intraday_scan_out"] = live
+                    st.session_state["intraday_scan_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                except Exception as exc:
+                    _log_api_error("run_intraday_scan", "-", exc)
+                    st.error("盤中行情取得失敗；請稍後再試。這次沒有呼叫 FinMind。")
+        if st.session_state.get("intraday_scan_out") is None:
+            cached_live = load_intraday_scan()
+            if isinstance(cached_live, dict):
+                st.session_state["intraday_scan_out"] = cached_live.get("out")
+                st.session_state["intraday_scan_saved_at"] = cached_live.get("saved_at")
+        live = st.session_state.get("intraday_scan_out")
+        if isinstance(live, pd.DataFrame) and not live.empty:
+            saved_at = st.session_state.get("intraday_scan_saved_at", "")
+            if saved_at: st.caption(f"🕒 最近一次盤中掃描：{saved_at}")
+            st.subheader("🔥 盤中最強候選")
+            cols = [c for c in ["排名","股票代碼","名稱","即時價","即時漲跌%","成交金額","盤中動能分","基準買進分","即時調整分","盤中訊號","風險","狀態"] if c in live.columns]
+            st.dataframe(live[cols], use_container_width=True, hide_index=True)
+            st.info("「基準買進分」來自最近一次盤後深度研究；「即時調整分」只用盤中行情做動態調整。因此盤中掃描不會重新呼叫完整 FinMind 研究資料。若尚無盤後結果，基準分暫以 50 計。")
+        else:
+            st.info("尚未執行盤中掃描。按上方「一鍵掃描現在市場」即可。")
+
+# --- TAB：盤後深度掃描 ---
+with tab_eod:
     _rc = regime.get("regime", "UNKNOWN")
     st.markdown(f"""
     <div class="regime-card regime-{_rc}" style="margin-bottom:14px;">
@@ -2340,7 +2501,7 @@ with tab_today:
       <div class="terminal-card"><div class="tc-label">DATA POLICY</div><div class="tc-value">PIT</div><div class="tc-sub">歷史訊號不使用未來日期資料</div></div>
     </div>
     """, unsafe_allow_html=True)
-    st.caption("打開就知道今天看什麼：先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。")
+    st.caption("盤後深度模式：完整更新研究資料，產生明日觀察名單。先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。")
 
     universe_df = get_stock_universe()
     if universe_df.empty:
@@ -2359,7 +2520,7 @@ with tab_today:
         cfg = SCAN_STRENGTH_CONFIG[strength_choice]
         scan_size = len(uni) if cfg["prefilter"] is None else min(cfg["prefilter"], len(uni))
         est_calls = scan_size + cfg["topk"] * 5
-        st.caption(f"「{strength_choice}」約掃描 {scan_size} 檔（優先取今日成交金額最高的股票，抓不到今日快照時才退回全市場隨機取樣），"
+        st.caption(f"「{strength_choice}」盤後約掃描 {scan_size} 檔（優先取今日成交金額最高的股票，抓不到今日快照時才退回全市場隨機取樣），"
                    f"通過流動性/資料完整性門檻的才進入技術初篩，再取前 {cfg['topk']} 檔做完整分析。")
 
         _quota_limit = 600 if st.session_state.get("token_applied") or has_finmind_secret() else 300
@@ -2370,7 +2531,7 @@ with tab_today:
         else:
             st.caption(f"（預估這一輪約消耗 {est_calls} 次 FinMind 額度，目前每小時上限 {_quota_limit} 次，足夠跑完。）")
 
-        if st.button("🚀 開始今日掃描", type="primary"):
+        if st.button("🌙 執行盤後深度掃描", type="primary"):
             scan_list = build_scan_list(uni, strength_choice)
             pre_rows = []
             with st.status(f"🔎 正在執行市場掃描… 0/{len(scan_list)}", expanded=False) as scan_status:
@@ -2426,10 +2587,14 @@ with tab_today:
                         st.session_state["market_scan_top5"] = out.head(5)
                         st.session_state["market_scan_saved_at"] = _saved_at
                         # 存到本機檔案：就算關掉 App 或重開機，這份結果也會留著，
-                        # 直到你下一次按「開始今日掃描」才會被覆蓋掉。
+                        # 直到你下一次按「執行盤後深度掃描」才會被覆蓋掉。
                         save_scan_to_disk({
                             "out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at
                         })
+                        try:
+                            pd.to_pickle({"out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at}, EOD_SCAN_CACHE_FILE)
+                        except Exception:
+                            pass
                         append_research_snapshot(out, _saved_at, regime.get("regime"), regime.get("score"))
                     else:
                         st.error("完整分析階段沒有取得有效資料。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
@@ -2441,20 +2606,20 @@ with tab_today:
             top5_df = st.session_state.get("market_scan_top5")
             _saved_at = st.session_state.get("market_scan_saved_at")
             if _saved_at:
-                st.caption(f"🕓 目前顯示的是 {_saved_at} 的掃描結果（重開 App 也不會消失，按「開始今日掃描」才會更新）。")
+                st.caption(f"🕓 目前顯示的是 {_saved_at} 的盤後深度掃描結果（重開 App 也不會消失，按「執行盤後深度掃描」才會更新）。")
 
             if top5_df is not None and not top5_df.empty:
-                st.subheader("🔥 今日最值得看")
+                st.subheader("🔥 明日最值得看")
                 for rank, (_, row) in enumerate(top5_df.iterrows(), start=1):
                     render_pick_card(row, rank)
 
-            st.subheader("📋 今日掃描結果")
+            st.subheader("📋 盤後深度結果")
             st.caption("先看「買進分」判斷條件強度，再看「風險／資料品質／風險調整優先級」決定研究順序；不要把買進分直接當成勝率。")
             show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
             show_scan_dataframe(out_df[show_cols])
 
             cands_df = st.session_state["market_scan_candidates"]
-            st.subheader("🟢 今日可買")
+            st.subheader("🟢 明日可優先研究")
             if cands_df.empty:
                 st.info("這次掃描沒有股票同時通過所有買進條件——今天先觀察就好。")
             else:
@@ -2918,7 +3083,7 @@ with tab_verify:
         st.caption("把每日買進分訊號轉成 5 / 10 / 20 個交易日的前瞻報酬，檢查分數是否真的有資訊價值；歷史勝率不是未來保證。")
         log = load_research_log()
         if log.empty:
-            st.info("尚未累積每日訊號快照。請先每天執行「今日選股」，系統會自動留下研究紀錄。")
+            st.info("尚未累積每日訊號快照。請先每天執行「盤後深度掃描」，系統會自動留下研究紀錄。")
         else:
             max_samples = st.slider("驗證樣本上限", 50, 1000, min(500, max(50, len(log))), 50)
             if st.button("🧪 建立前瞻報酬校準", type="primary"):
@@ -2962,4 +3127,4 @@ with tab_verify:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V9.0 · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
+st.caption("台股量化羅盤 Quant Compass V10.0 · Smart Real-Time Scanner · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
