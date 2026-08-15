@@ -3687,14 +3687,24 @@ with tab_verify:
         if log.empty:
             st.info("尚未累積每日訊號快照。請先每天執行「盤後深度掃描」，系統會自動留下研究紀錄。")
         else:
-            max_samples = st.slider("驗證樣本上限", 50, 1000, min(500, max(50, len(log))), 50)
-            if st.button("🧪 建立前瞻報酬校準", type="primary"):
-                with st.status("正在讀取訊號後續價格並建立校準資料…", expanded=False):
+            # AI戰績：一般使用者開啟即自動更新，不再要求手動建立校準。
+            max_samples = min(500, max(50, len(log)))
+            cal = st.session_state.get("calibration_table", pd.DataFrame())
+            detail = st.session_state.get("calibration_detail", pd.DataFrame())
+            if cal is None or cal.empty:
+                with st.status("🤖 AI戰績自動更新中…", expanded=False):
                     detail, cal = build_forward_calibration(log, max_samples=max_samples)
                     st.session_state["calibration_detail"] = detail
                     st.session_state["calibration_table"] = cal
-            cal = st.session_state.get("calibration_table", pd.DataFrame())
-            detail = st.session_state.get("calibration_detail", pd.DataFrame())
+
+            # 研究人員工具：保留原功能，但移入進階區域。
+            with st.expander("🔬 進階研究工具：建立前瞻報酬校準", expanded=False):
+                research_limit = st.slider("驗證樣本上限", 50, 1000, max_samples, 50, key="research_calibration_limit")
+                if st.button("🧪 建立前瞻報酬校準", type="primary"):
+                    with st.status("正在讀取訊號後續價格並建立校準資料…", expanded=False):
+                        detail, cal = build_forward_calibration(log, max_samples=research_limit)
+                        st.session_state["calibration_detail"] = detail
+                        st.session_state["calibration_table"] = cal
             if cal is not None and not cal.empty:
                 st.markdown("### 📊 買進分 → 實際前瞻表現")
                 st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
