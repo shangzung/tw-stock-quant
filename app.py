@@ -1,5 +1,5 @@
 # app.py
-# 台股 V8.5 研究級量化決策 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
+# 台股 V9.0 研究級量化決策 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -42,6 +42,152 @@ TOKEN_FILE = CACHE_DIR / "finmind_token.json"
 SCAN_CACHE_FILE = CACHE_DIR / "last_scan.pkl"
 HOLDINGS_FILE = CACHE_DIR / "holdings.json"
 
+
+
+
+# =========================
+# V9.0 Strategy Validation Engine
+# =========================
+RESEARCH_LOG_FILE = CACHE_DIR / "research_signal_log.jsonl"
+CALIBRATION_CACHE_FILE = CACHE_DIR / "calibration_result.pkl"
+
+
+def append_research_snapshot(df, saved_at=None, market_regime=None, market_score=None):
+    """跨 session 保存每日訊號快照；只保存校準所需的輕量欄位。"""
+    if df is None or df.empty:
+        return False
+    try:
+        ts = saved_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        keep = ["股票代碼", "名稱", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "現價", "日期"]
+        rows = []
+        for _, r in df.iterrows():
+            rec = {"snapshot_at": ts, "market_regime": market_regime, "market_score": market_score}
+            for k in keep:
+                v = r.get(k)
+                if isinstance(v, (np.integer,)): v = int(v)
+                elif isinstance(v, (np.floating,)): v = float(v)
+                elif pd.isna(v) if not isinstance(v, (list, dict)) else False: v = None
+                rec[k] = v
+            rows.append(json.dumps(rec, ensure_ascii=False, default=str))
+        with RESEARCH_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+        return True
+    except Exception as e:
+        _log_api_error("append_research_snapshot", "", e)
+        return False
+
+
+def load_research_log():
+    if not RESEARCH_LOG_FILE.exists():
+        return pd.DataFrame()
+    rows = []
+    try:
+        with RESEARCH_LOG_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _score_bucket(x):
+    try: x = float(x)
+    except Exception: return "N/A"
+    if x >= 90: return "90+"
+    if x >= 85: return "85–89"
+    if x >= 80: return "80–84"
+    if x >= 75: return "75–79"
+    if x >= 70: return "70–74"
+    if x >= 65: return "65–69"
+    if x >= 60: return "60–64"
+    return "<60"
+
+
+def build_forward_calibration(log_df, max_samples=500, forward_days=(5, 10, 20)):
+    """將歷史訊號與訊號後第一個交易日及其後 N 日收盤連接，建立前瞻報酬校準。"""
+    if log_df is None or log_df.empty or "股票代碼" not in log_df.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    d = log_df.copy()
+    d["signal_date"] = pd.to_datetime(d.get("日期"), errors="coerce")
+    if d["signal_date"].isna().all() and "snapshot_at" in d.columns:
+        d["signal_date"] = pd.to_datetime(d["snapshot_at"], errors="coerce").dt.normalize()
+    d = d.dropna(subset=["signal_date"])
+    d = d.sort_values("snapshot_at" if "snapshot_at" in d.columns else "signal_date")
+    d = d.drop_duplicates(["股票代碼", "signal_date"], keep="last")
+    if len(d) > max_samples:
+        d = d.tail(max_samples)
+    cache = {}
+    rows = []
+    for _, r in d.iterrows():
+        sid = str(r.get("股票代碼", "")).strip()
+        if not sid: continue
+        if sid not in cache:
+            cache[sid] = get_daily(sid, 1500)
+        px = cache[sid]
+        if px is None or px.empty or "date" not in px.columns or "close" not in px.columns:
+            continue
+        px = px.copy()
+        px["date"] = pd.to_datetime(px["date"], errors="coerce")
+        px["close"] = pd.to_numeric(px["close"], errors="coerce")
+        px = px.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        sig = pd.Timestamp(r["signal_date"]).normalize()
+        future = px[px["date"] > sig]
+        if future.empty: continue
+        entry = float(future.iloc[0]["close"])
+        rec = {"股票代碼": sid, "訊號日": sig.strftime("%Y-%m-%d"),
+               "買進分": safe_float(r.get("買進分")), "分數區間": _score_bucket(r.get("買進分")),
+               "市場環境": r.get("market_regime"), "風險": r.get("風險"), "entry_close": entry}
+        for n in forward_days:
+            rec[f"{n}D報酬"] = (float(future.iloc[n-1]["close"]) / entry - 1) if len(future) >= n else np.nan
+        rows.append(rec)
+    detail = pd.DataFrame(rows)
+    if detail.empty: return detail, pd.DataFrame()
+    summary = []
+    for bucket in ["<60", "60–64", "65–69", "70–74", "75–79", "80–84", "85–89", "90+"]:
+        g = detail[detail["分數區間"] == bucket]
+        if g.empty: continue
+        rec = {"分數區間": bucket, "樣本數": len(g)}
+        for n in forward_days:
+            v = pd.to_numeric(g[f"{n}D報酬"], errors="coerce").dropna()
+            rec[f"{n}D勝率"] = float((v > 0).mean() * 100) if len(v) else np.nan
+            rec[f"{n}D平均報酬"] = float(v.mean() * 100) if len(v) else np.nan
+            rec[f"{n}D中位數"] = float(v.median() * 100) if len(v) else np.nan
+        summary.append(rec)
+    return detail, pd.DataFrame(summary)
+
+
+def strategy_drift_report(detail, horizon="10D報酬", recent_n=20, baseline_n=60):
+    if detail is None or detail.empty or horizon not in detail.columns:
+        return {"status": "INSUFFICIENT", "message": "尚無可用前瞻報酬資料。"}
+    d = detail.sort_values("訊號日")
+    v = pd.to_numeric(d[horizon], errors="coerce").dropna()
+    if len(v) < recent_n:
+        return {"status": "INSUFFICIENT", "message": f"樣本不足：至少需要 {recent_n} 筆有效 {horizon}。"}
+    recent = v.tail(recent_n)
+    base = v.tail(max(baseline_n, len(v)))
+    rw, bw = float((recent > 0).mean()), float((base > 0).mean())
+    rr, br = float(recent.mean()), float(base.mean())
+    wd, rd = rw - bw, rr - br
+    if wd <= -0.15 or rd <= -0.05: status = "DRIFT"
+    elif wd <= -0.08 or rd <= -0.02: status = "WATCH"
+    else: status = "STABLE"
+    msg = {"DRIFT": "🔴 最近策略表現明顯低於歷史基準，建議降低風險曝險並檢查因子失效。",
+           "WATCH": "🟡 最近策略表現弱於歷史基準，進入觀察區。",
+           "STABLE": "🟢 最近策略表現仍在歷史合理範圍。"}[status]
+    return {"status": status, "recent_win": rw, "baseline_win": bw, "win_delta": wd,
+            "recent_return": rr, "baseline_return": br, "return_delta": rd,
+            "recent_n": len(recent), "baseline_n": len(base), "message": msg}
+
+
+def calibration_reliability(n):
+    n = int(n or 0)
+    if n >= 200: return "高"
+    if n >= 80: return "中"
+    if n >= 30: return "低"
+    return "極低"
 
 def load_saved_token():
     try:
@@ -2284,6 +2430,7 @@ with tab_today:
                         save_scan_to_disk({
                             "out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at
                         })
+                        append_research_snapshot(out, _saved_at, regime.get("regime"), regime.get("score"))
                     else:
                         st.error("完整分析階段沒有取得有效資料。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
                 else:
@@ -2589,7 +2736,7 @@ with tab_holdings:
 
 with tab_verify:
     st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
-    sub_year, sub_week, sub_single, sub_portfolio, sub_wf = st.tabs(["⏳ 年份模擬", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward"])
+    sub_year, sub_week, sub_single, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
 
     def build_equity_benchmark_figure(result, title="資產曲線 vs Benchmark"):
         eq = result.get("equity", pd.Series(dtype=float))
@@ -2766,6 +2913,53 @@ with tab_verify:
             st.dataframe(wf,use_container_width=True,hide_index=True)
             st.success("OOS 報表完成。訓練區只用於建立時間切點，測試區完全獨立；本版不自動最佳化參數，避免把資料探勘結果誤當成真實 OOS。")
 
+    with sub_strategy:
+        st.subheader("🧠 策略驗證中心")
+        st.caption("把每日買進分訊號轉成 5 / 10 / 20 個交易日的前瞻報酬，檢查分數是否真的有資訊價值；歷史勝率不是未來保證。")
+        log = load_research_log()
+        if log.empty:
+            st.info("尚未累積每日訊號快照。請先每天執行「今日選股」，系統會自動留下研究紀錄。")
+        else:
+            max_samples = st.slider("驗證樣本上限", 50, 1000, min(500, max(50, len(log))), 50)
+            if st.button("🧪 建立前瞻報酬校準", type="primary"):
+                with st.status("正在讀取訊號後續價格並建立校準資料…", expanded=False):
+                    detail, cal = build_forward_calibration(log, max_samples=max_samples)
+                    st.session_state["calibration_detail"] = detail
+                    st.session_state["calibration_table"] = cal
+            cal = st.session_state.get("calibration_table", pd.DataFrame())
+            detail = st.session_state.get("calibration_detail", pd.DataFrame())
+            if cal is not None and not cal.empty:
+                st.markdown("### 📊 買進分 → 實際前瞻表現")
+                st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
+                total = len(detail)
+                st.caption(f"有效樣本 {total:,} 筆；整體校準可靠度：{calibration_reliability(total)}。樣本越少，越不應把勝率視為穩定機率。")
+                if "10D平均報酬" in cal.columns:
+                    eligible = cal[cal["樣本數"] >= max(10, int(total * 0.03))]
+                    if not eligible.empty:
+                        best = eligible.sort_values("10D平均報酬", ascending=False).iloc[0]
+                        a,b,c,d = st.columns(4)
+                        a.metric("最佳 10D 分數區間", best["分數區間"])
+                        b.metric("10D 勝率", f"{best['10D勝率']:.1f}%")
+                        c.metric("10D 平均報酬", f"{best['10D平均報酬']:.2f}%")
+                        d.metric("樣本數", f"{int(best['樣本數']):,}")
+                st.markdown("### 🚨 Strategy Drift 失效偵測")
+                drift = strategy_drift_report(detail)
+                if drift.get("status") == "INSUFFICIENT":
+                    st.info(drift["message"])
+                else:
+                    a,b,c,d = st.columns(4)
+                    a.metric("狀態", drift["status"])
+                    b.metric("最近 20 筆勝率", f"{drift['recent_win']*100:.1f}%")
+                    c.metric("歷史基準勝率", f"{drift['baseline_win']*100:.1f}%")
+                    d.metric("勝率變化", f"{drift['win_delta']*100:+.1f}%")
+                    if drift["status"] == "DRIFT": st.error(drift["message"])
+                    elif drift["status"] == "WATCH": st.warning(drift["message"])
+                    else: st.success(drift["message"])
+                with st.expander("🔬 前瞻訊號明細"):
+                    st.dataframe(detail.sort_values("訊號日", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.info("尚未建立校準結果。按下「建立前瞻報酬校準」開始。")
+
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V8.5 · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
+st.caption("台股量化羅盤 Quant Compass V9.0 · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
