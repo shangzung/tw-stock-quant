@@ -3415,52 +3415,88 @@ with tab_verify:
             st.success("OOS 報表完成。訓練區只用於建立時間切點，測試區完全獨立；本版不自動最佳化參數，避免把資料探勘結果誤當成真實 OOS。")
 
     with sub_strategy:
-        st.subheader("🧠 策略驗證中心")
-        st.caption("把每日買進分訊號轉成 5 / 10 / 20 個交易日的前瞻報酬，檢查分數是否真的有資訊價值；歷史勝率不是未來保證。")
+        st.subheader("🧠 策略健康檢查")
+        st.caption("此功能不重新掃描全市場，而是使用每日盤後/盤中留下的訊號紀錄，追蹤這套買進分邏輯在真實市場中的表現。")
+
         log = load_research_log()
+
         if log.empty:
-            st.info("尚未累積每日訊號快照。請先每天執行「盤後深度掃描」，系統會自動留下研究紀錄。")
+            st.info("目前沒有歷史訊號紀錄。請先執行盤後深度掃描，系統會逐日保存選股結果，未來自動驗證。")
         else:
-            max_samples = st.slider("驗證樣本上限", 50, 1000, min(500, max(50, len(log))), 50)
-            if st.button("🧪 建立前瞻報酬校準", type="primary"):
-                with st.status("正在讀取訊號後續價格並建立校準資料…", expanded=False):
-                    detail, cal = build_forward_calibration(log, max_samples=max_samples)
-                    st.session_state["calibration_detail"] = detail
-                    st.session_state["calibration_table"] = cal
-            cal = st.session_state.get("calibration_table", pd.DataFrame())
-            detail = st.session_state.get("calibration_detail", pd.DataFrame())
-            if cal is not None and not cal.empty:
-                st.markdown("### 📊 買進分 → 實際前瞻表現")
-                st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
-                total = len(detail)
-                st.caption(f"有效樣本 {total:,} 筆；整體校準可靠度：{calibration_reliability(total)}。樣本越少，越不應把勝率視為穩定機率。")
-                if "10D平均報酬" in cal.columns:
-                    eligible = cal[cal["樣本數"] >= max(10, int(total * 0.03))]
-                    if not eligible.empty:
-                        best = eligible.sort_values("10D平均報酬", ascending=False).iloc[0]
-                        a,b,c,d = st.columns(4)
-                        a.metric("最佳 10D 分數區間", best["分數區間"])
-                        b.metric("10D 勝率", f"{best['10D勝率']:.1f}%")
-                        c.metric("10D 平均報酬", f"{best['10D平均報酬']:.2f}%")
-                        d.metric("樣本數", f"{int(best['樣本數']):,}")
-                st.markdown("### 🚨 Strategy Drift 失效偵測")
+            st.success(f"目前累積訊號：{len(log):,} 筆")
+
+            if st.button("🔍 執行策略健康檢查", type="primary"):
+                with st.status("正在分析歷史訊號後續表現…", expanded=False):
+                    detail, cal = build_forward_calibration(log, max_samples=len(log))
+                    st.session_state["health_detail"] = detail
+                    st.session_state["health_table"] = cal
+
+            detail = st.session_state.get("health_detail", pd.DataFrame())
+            cal = st.session_state.get("health_table", pd.DataFrame())
+
+            if detail is not None and not detail.empty:
+
+                st.markdown("### 📊 這套選股邏輯過去表現")
+
+                c1, c2, c3 = st.columns(3)
+
+                for col, days in zip([c1, c2, c3], ["5D", "10D", "20D"]):
+                    win_col = f"{days}勝率"
+                    ret_col = f"{days}平均報酬"
+
+                    if win_col in detail.columns:
+                        win = detail[win_col].mean()
+                        ret = detail[ret_col].mean() if ret_col in detail.columns else 0
+
+                        col.metric(
+                            f"{days} 後",
+                            f"勝率 {win:.1f}%",
+                            f"平均 {ret:.2f}%"
+                        )
+
+                st.markdown("### 🎯 買進分是否有效")
+
+                if cal is not None and not cal.empty:
+                    keep_cols = [
+                        c for c in [
+                            "分數區間",
+                            "樣本數",
+                            "10D勝率",
+                            "10D平均報酬",
+                            "20D勝率",
+                            "20D平均報酬"
+                        ]
+                        if c in cal.columns
+                    ]
+
+                    if keep_cols:
+                        st.dataframe(
+                            cal[keep_cols].round(2),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                st.markdown("### 🚦 目前策略狀態")
+
                 drift = strategy_drift_report(detail)
-                if drift.get("status") == "INSUFFICIENT":
-                    st.info(drift["message"])
+
+                if drift.get("status") == "DRIFT":
+                    st.error("🔴 策略可能失效，需要重新檢查市場環境")
+                elif drift.get("status") == "WATCH":
+                    st.warning("🟡 策略需要觀察")
                 else:
-                    a,b,c,d = st.columns(4)
-                    a.metric("狀態", drift["status"])
-                    b.metric("最近 20 筆勝率", f"{drift['recent_win']*100:.1f}%")
-                    c.metric("歷史基準勝率", f"{drift['baseline_win']*100:.1f}%")
-                    d.metric("勝率變化", f"{drift['win_delta']*100:+.1f}%")
-                    if drift["status"] == "DRIFT": st.error(drift["message"])
-                    elif drift["status"] == "WATCH": st.warning(drift["message"])
-                    else: st.success(drift["message"])
-                with st.expander("🔬 前瞻訊號明細"):
-                    st.dataframe(detail.sort_values("訊號日", ascending=False), use_container_width=True, hide_index=True)
+                    st.success("🟢 策略目前維持正常")
+
+                with st.expander("📋 查看詳細訊號紀錄"):
+                    st.dataframe(
+                        detail.sort_values("訊號日", ascending=False),
+                        use_container_width=True,
+                        hide_index=True
+                    )
             else:
-                st.info("尚未建立校準結果。按下「建立前瞻報酬校準」開始。")
+                st.info("尚未建立驗證資料，請先累積盤後掃描訊號。")
+
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
+st.caption("台股量化羅盤 Quant Compass V10.2 Strategy Health Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
