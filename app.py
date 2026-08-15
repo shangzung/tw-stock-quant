@@ -10,6 +10,7 @@
 
 import time
 import math
+import html
 import json
 import threading
 import uuid
@@ -543,6 +544,11 @@ st.markdown("""
     .terminal-card .tc-value { margin-top:6px; font-size:24px; line-height:1.1; font-weight:800; font-variant-numeric:tabular-nums; }
     .terminal-card .tc-unit { font-size:12px; color:var(--text-sub); margin-left:3px; }
     .terminal-card .tc-sub { margin-top:6px; font-size:11.5px; color:var(--text-sub); line-height:1.4; }
+    @media (max-width: 900px) {
+        .intraday-pick-grid { grid-template-columns:1fr; }
+        .intraday-kpi-grid { grid-template-columns:1fr; }
+        .intraday-detail-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    }
     @media (max-width: 900px) { .terminal-grid { grid-template-columns:1fr 1fr; } }
     @media (max-width: 560px) { .terminal-grid { grid-template-columns:1fr; } }
 
@@ -752,8 +758,8 @@ st.markdown("""
     .intraday-kpi { padding:13px 15px; border:1px solid var(--border-c); border-radius:12px; background:var(--bg-card-2); }
     .intraday-kpi-label { color:var(--text-sub); font-size:11px; font-weight:600; }
     .intraday-kpi-value { margin-top:5px; font-size:23px; font-weight:800; font-variant-numeric:tabular-nums; }
-    .intraday-pick-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:10px 0 14px; }
-    .intraday-pick { min-height:190px; padding:17px 18px; border:1px solid var(--border-c); border-radius:15px; background:linear-gradient(180deg,#171b23 0%,#101217 100%); }
+    .intraday-pick-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:10px 0 14px; align-items:stretch; }
+    .intraday-pick { min-width:0; min-height:190px; padding:17px 18px; border:1px solid var(--border-c); border-radius:15px; background:linear-gradient(180deg,#171b23 0%,#101217 100%); }
     .intraday-pick:hover { border-color:#555b66; box-shadow:0 8px 22px rgba(0,0,0,.28); }
     .ip-rank { color:var(--text-sub); font-size:11px; font-weight:700; }
     .ip-name { margin-top:4px; font-size:17px; font-weight:800; }
@@ -2955,27 +2961,46 @@ with tab_intraday:
                 ai = safe_float(r.get("盤中 AI"), np.nan)
                 base = safe_float(r.get("基準買進分"), np.nan)
                 delta = safe_float(r.get("AI變化"), np.nan)
+
                 if pd.isna(delta):
                     delta_html = "—"
                 else:
                     arrow = "▲" if delta > 0 else "▼" if delta < 0 else "＝"
                     cls = "tw-up" if delta > 0 else "tw-down" if delta < 0 else "tw-flat"
                     delta_html = f"{base:.0f} → {ai:.0f}　<span class='{cls}'>{arrow} {abs(delta):.1f}</span>"
+
                 price = safe_float(r.get("即時價"), np.nan)
                 pct = safe_float(r.get("即時漲跌%"), np.nan)
                 pct_cls = "tw-up" if pct > 0 else "tw-down" if pct < 0 else "tw-flat"
-                cards.append(f"""
-                <div class="intraday-pick">
-                    <div class="ip-rank">#{int(r.get('排名', 0))}</div>
-                    <div class="ip-name">{r.get('股票代碼','')} {r.get('名稱','')}</div>
-                    <div class="ip-score-row"><span class="ip-score">{ai:.0f}</span><span class="ip-score-label">盤中 AI</span></div>
-                    <div class="ip-badges"><span class="ip-action {action_cls}">{action}</span><span class="ip-risk {risk_cls}">{risk}</span><span class="ip-change">{r.get('盤中變化','🟡 盤中中性')}</span></div>
-                    <div class="ip-delta">{delta_html}</div>
-                    <div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span></div>
-                    <div class="ip-reason">{r.get('關注原因','等待更多盤中訊號確認')}</div>
-                </div>
-                """)
-            st.markdown("<div class='intraday-pick-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+                # Escape dataframe text so a stock name/reason can never break the HTML block.
+                code = html.escape(str(r.get("股票代碼", "")))
+                name = html.escape(str(r.get("名稱", "")))
+                action_safe = html.escape(action)
+                risk_safe = html.escape(risk)
+                change_safe = html.escape(str(r.get("盤中變化", "🟡 盤中中性")))
+                reason_safe = html.escape(str(r.get("關注原因", "等待更多盤中訊號確認")))
+                rank = int(r.get("排名", 0))
+
+                card_html = (
+                    f'<div class="intraday-pick">'
+                    f'<div class="ip-rank">#{rank}</div>'
+                    f'<div class="ip-name">{code} {name}</div>'
+                    f'<div class="ip-score-row"><span class="ip-score">{ai:.0f}</span><span class="ip-score-label">盤中 AI</span></div>'
+                    f'<div class="ip-badges"><span class="ip-action {action_cls}">{action_safe}</span>'
+                    f'<span class="ip-risk {risk_cls}">{risk_safe}</span>'
+                    f'<span class="ip-change">{change_safe}</span></div>'
+                    f'<div class="ip-delta">{delta_html}</div>'
+                    f'<div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span></div>'
+                    f'<div class="ip-reason">{reason_safe}</div>'
+                    f'</div>'
+                )
+                cards.append(card_html)
+
+            # IMPORTANT: keep all cards inside ONE continuous HTML block.
+            # Streamlit's Markdown parser may treat blank-line-separated HTML blocks as raw text.
+            cards_html = "<div class='intraday-pick-grid'>" + "".join(cards) + "</div>"
+            st.markdown(cards_html, unsafe_allow_html=True)
 
             st.markdown("### 🔎 查看分析")
             for _, r in top3.iterrows():
