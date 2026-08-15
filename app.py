@@ -348,6 +348,8 @@ if "holdings_rows" not in st.session_state:
     st.session_state["holdings_rows"] = holdings_rows_from_df(load_saved_holdings())
 if "holdings_health_res" not in st.session_state:
     st.session_state["holdings_health_res"] = None
+if "intraday_scan_out" not in st.session_state: st.session_state["intraday_scan_out"] = None
+if "intraday_scan_saved_at" not in st.session_state: st.session_state["intraday_scan_saved_at"] = None
 
 # Mac 風格與手機端最佳化 CSS
 st.markdown("""
@@ -678,143 +680,6 @@ st.markdown("""
     .holding-card ul.hc-reasons { margin: 12px 0 0 0; padding: 0 0 0 18px; font-size: 13.5px; color: var(--text-sub); line-height: 1.7; }
 
     /* =========================
-       盤中兩層模式：一般模式 → 詳細分析
-       ========================= */
-    .intraday-overview-grid {
-        display:grid;
-        grid-template-columns:repeat(3,1fr);
-        gap:10px;
-        margin:8px 0 14px;
-    }
-    .intraday-overview-card {
-        padding:14px 16px;
-        border:1px solid var(--border-c);
-        border-radius:12px;
-        background:linear-gradient(180deg,#151922 0%,#0d1016 100%);
-        min-height:78px;
-    }
-    .intraday-overview-card .ioc-label {
-        color:var(--text-sub);
-        font-size:11px;
-        font-weight:700;
-        margin-bottom:7px;
-    }
-    .intraday-overview-card .ioc-value {
-        font-size:25px;
-        font-weight:800;
-        line-height:1;
-        font-variant-numeric:tabular-nums;
-    }
-    .intraday-overview-card .ioc-value span {
-        font-size:12px;
-        color:var(--text-sub);
-        font-weight:600;
-        margin-left:2px;
-    }
-    .intraday-overview-card .ioc-sub {
-        margin-top:5px;
-        font-size:10.5px;
-        color:var(--text-sub);
-    }
-    .ai-picks-title {
-        display:flex;
-        justify-content:space-between;
-        align-items:end;
-        gap:12px;
-        margin:20px 0 10px;
-    }
-    .ai-picks-kicker {
-        color:var(--accent-blue);
-        font-size:10px;
-        font-weight:800;
-        letter-spacing:.12em;
-    }
-    .ai-picks-heading {
-        font-size:21px;
-        font-weight:800;
-        margin-top:2px;
-    }
-    .ai-picks-hint {
-        color:var(--text-sub);
-        font-size:11px;
-        padding-bottom:2px;
-    }
-    .ai-pick-card {
-        min-height:128px;
-        padding:15px 16px;
-        border:1px solid var(--border-c);
-        border-radius:14px;
-        background:linear-gradient(180deg,#171c26 0%,#0e1117 100%);
-        box-shadow:0 6px 16px rgba(0,0,0,.22);
-        transition:transform .15s ease, border-color .15s ease;
-    }
-    .ai-pick-card:hover {
-        transform:translateY(-2px);
-        border-color:#4a5362;
-    }
-    .ai-pick-rank {
-        color:var(--accent-blue);
-        font-size:11px;
-        font-weight:800;
-        margin-bottom:4px;
-    }
-    .ai-pick-stock {
-        font-size:17px;
-        font-weight:800;
-        white-space:nowrap;
-        overflow:hidden;
-        text-overflow:ellipsis;
-    }
-    .ai-pick-score {
-        font-size:30px;
-        line-height:1;
-        font-weight:900;
-        margin:9px 0 10px;
-        font-variant-numeric:tabular-nums;
-    }
-    .ai-pick-score span {
-        font-size:11px;
-        color:var(--text-sub);
-        font-weight:600;
-        margin-left:2px;
-    }
-    .ai-pick-meta {
-        display:flex;
-        gap:7px;
-        flex-wrap:wrap;
-        align-items:center;
-    }
-    .ai-signal, .ai-risk {
-        display:inline-block;
-        padding:3px 8px;
-        border-radius:999px;
-        border:1px solid var(--border-c);
-        font-size:11px;
-        font-weight:700;
-    }
-    .ai-signal {
-        color:var(--accent-green);
-        background:rgba(48,209,88,.10);
-    }
-    .ai-risk {
-        color:var(--text-sub);
-        background:rgba(255,255,255,.03);
-    }
-    .simple-mode-title, .detail-mode-title {
-        font-size:16px;
-        font-weight:800;
-        margin-top:20px;
-        margin-bottom:3px;
-    }
-    .detail-mode-title {
-        margin-top:22px;
-    }
-    @media (max-width: 800px) {
-        .intraday-overview-grid { grid-template-columns:1fr; }
-        .ai-picks-title { align-items:flex-start; flex-direction:column; }
-    }
-
-    /* =========================
        V10 Taiwan Trading Terminal UI
        ========================= */
     .terminal-header {
@@ -878,6 +743,42 @@ st.markdown("""
     .decision-buy { color:#fff !important; background:rgba(48,209,88,.78); border-radius:5px; padding:3px 7px; font-weight:800; }
     .decision-watch { color:#111 !important; background:rgba(255,214,10,.9); border-radius:5px; padding:3px 7px; font-weight:800; }
     .decision-stop { color:#fff !important; background:rgba(255,69,58,.82); border-radius:5px; padding:3px 7px; font-weight:800; }
+
+    /* ── V10 盤中「今日機會」兩層決策 UI ── */
+    .intraday-hero { padding:22px 24px; border:1px solid var(--border-c); border-radius:18px; background:linear-gradient(135deg,rgba(10,132,255,.12),rgba(20,20,24,.96)); margin:4px 0 14px; }
+    .intraday-hero-title { font-size:25px; font-weight:800; letter-spacing:-.02em; }
+    .intraday-hero-sub { margin-top:5px; color:var(--text-sub); font-size:12.5px; line-height:1.55; }
+    .intraday-kpi-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:12px 0 16px; }
+    .intraday-kpi { padding:13px 15px; border:1px solid var(--border-c); border-radius:12px; background:var(--bg-card-2); }
+    .intraday-kpi-label { color:var(--text-sub); font-size:11px; font-weight:600; }
+    .intraday-kpi-value { margin-top:5px; font-size:23px; font-weight:800; font-variant-numeric:tabular-nums; }
+    .intraday-pick-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:10px 0 14px; }
+    .intraday-pick { min-height:190px; padding:17px 18px; border:1px solid var(--border-c); border-radius:15px; background:linear-gradient(180deg,#171b23 0%,#101217 100%); }
+    .intraday-pick:hover { border-color:#555b66; box-shadow:0 8px 22px rgba(0,0,0,.28); }
+    .ip-rank { color:var(--text-sub); font-size:11px; font-weight:700; }
+    .ip-name { margin-top:4px; font-size:17px; font-weight:800; }
+    .ip-score-row { display:flex; align-items:baseline; gap:7px; margin-top:12px; }
+    .ip-score { font-size:31px; line-height:1; font-weight:900; color:#58a6ff; }
+    .ip-score-label { color:var(--text-sub); font-size:11px; }
+    .ip-badges { display:flex; gap:7px; flex-wrap:wrap; margin-top:11px; }
+    .ip-action, .ip-risk, .ip-change { display:inline-block; padding:4px 9px; border-radius:999px; font-size:11.5px; font-weight:800; border:1px solid rgba(255,255,255,.08); }
+    .ip-buy { background:rgba(48,209,88,.18); color:#62e981; }
+    .ip-wait { background:rgba(255,214,10,.16); color:#ffe45e; }
+    .ip-observe { background:rgba(255,159,10,.16); color:#ffb454; }
+    .ip-skip { background:rgba(255,69,58,.16); color:#ff756d; }
+    .ip-risk-low { background:rgba(48,209,88,.12); color:#62e981; }
+    .ip-risk-mid { background:rgba(255,214,10,.12); color:#ffe45e; }
+    .ip-risk-high { background:rgba(255,69,58,.12); color:#ff756d; }
+    .ip-change { background:rgba(10,132,255,.12); color:#7abaff; }
+    .ip-delta { margin-top:10px; font-size:12px; color:var(--text-sub); font-variant-numeric:tabular-nums; }
+    .ip-reason { margin-top:8px; font-size:12px; color:var(--text-sub); line-height:1.5; }
+    .ip-price { margin-top:8px; font-size:12px; color:var(--text-sub); }
+    .intraday-detail-title { font-size:15px; font-weight:800; }
+    .intraday-detail-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:8px 0 10px; }
+    .intraday-detail-box { padding:10px 11px; border:1px solid var(--border-c); border-radius:10px; background:var(--bg-card); }
+    .intraday-detail-box .label { color:var(--text-sub); font-size:10.5px; }
+    .intraday-detail-box .value { margin-top:3px; font-size:15px; font-weight:800; font-variant-numeric:tabular-nums; }
+    @media (max-width: 900px) { .intraday-pick-grid, .intraday-kpi-grid { grid-template-columns:1fr; } .intraday-detail-grid { grid-template-columns:1fr 1fr; } }
 
     @media (max-width: 1100px) {
         .market-overview { grid-template-columns:repeat(3,1fr); }
@@ -1319,101 +1220,6 @@ def style_intraday_table(df):
     return style_market_returns(df, [c for c in ["漲跌", "即時漲跌%"] if c in df.columns])
 
 
-def _intraday_simple_signal(row):
-    """把內部盤中訊號翻成一般使用者一眼看得懂的訊號。"""
-    raw = str(row.get("盤中訊號", "") or "")
-    pct = safe_float(row.get("即時漲跌%"), 0)
-    momentum = safe_float(row.get("盤中動能分"), 50)
-    base = safe_float(row.get("基準買進分"), 50)
-
-    if "強勢放量" in raw or pct >= 5:
-        return "🟢 偏強"
-    if "轉強" in raw or momentum >= base + 3 or pct >= 2:
-        return "🟢 偏強"
-    if "轉弱" in raw or pct <= -3 or momentum < 45:
-        return "🔴 偏弱"
-    return "🟡 觀察"
-
-
-def _intraday_simple_risk(value):
-    """把內部風險標籤簡化成『低／中／高』。"""
-    s = str(value or "").strip()
-    if "低" in s:
-        return "低"
-    if "高" in s:
-        return "高"
-    if "中" in s:
-        return "中"
-    return "—"
-
-
-def _intraday_reasons(row):
-    """依現有資料產生可解釋的三項盤中理由，不新增任何資料來源。"""
-    reasons = []
-    turnover = safe_float(row.get("成交金額"), 0)
-    momentum = safe_float(row.get("盤中動能分"), np.nan)
-    base = safe_float(row.get("基準買進分"), np.nan)
-    pct = safe_float(row.get("即時漲跌%"), 0)
-    status = str(row.get("狀態", "") or "")
-
-    if turnover >= 1_000_000_000:
-        reasons.append("成交活躍")
-    elif turnover >= 500_000_000:
-        reasons.append("成交放大")
-    elif turnover >= 100_000_000:
-        reasons.append("有量支撐")
-
-    if not pd.isna(momentum) and not pd.isna(base):
-        if momentum >= base + 3:
-            reasons.append("盤中動能增強")
-        elif momentum >= 60:
-            reasons.append("盤中動能偏強")
-        elif momentum <= 45:
-            reasons.append("盤中動能轉弱")
-
-    if pct >= 2:
-        reasons.append("價格轉強")
-    elif pct <= -3:
-        reasons.append("價格轉弱")
-
-    if "趨勢" in status and "轉弱" not in status:
-        reasons.append("趨勢維持")
-    elif "起漲" in status or "發動" in status:
-        reasons.append("趨勢發動")
-
-    if not reasons:
-        reasons.append("盤中條件維持中性")
-
-    return list(dict.fromkeys(reasons))[:3]
-
-
-def render_intraday_detail(row):
-    """第二層：點開單一股票後才顯示完整盤中分析。"""
-    code = str(row.get("股票代碼", "") or "")
-    name = str(row.get("名稱", "") or "")
-    price = safe_float(row.get("即時價"), np.nan)
-    base = safe_float(row.get("基準買進分"), np.nan)
-    momentum = safe_float(row.get("盤中動能分"), np.nan)
-    adjusted = safe_float(row.get("即時調整分"), np.nan)
-    turnover = safe_float(row.get("成交金額"), np.nan)
-    pct = safe_float(row.get("即時漲跌%"), np.nan)
-    signal = _intraday_simple_signal(row)
-    risk = _intraday_simple_risk(row.get("風險"))
-
-    st.markdown(f"**{code} {name}**　{signal}　風險：**{risk}**")
-    st.caption(f"盤中 AI 判讀：現價 {price:.2f}｜即時漲跌 {pct:+.2f}%")
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("買進分", "—" if pd.isna(base) else f"{base:.1f}")
-    m2.metric("盤中動能", "—" if pd.isna(momentum) else f"{momentum:.0f}")
-    m3.metric("即時調整", "—" if pd.isna(adjusted) else f"{adjusted:.1f}")
-    m4.metric("成交金額", "—" if pd.isna(turnover) else f"{turnover / 1e8:.2f}億")
-
-    reasons = _intraday_reasons(row)
-    st.markdown("**AI分析原因**")
-    st.markdown("\n".join(f"✓ {r}" for r in reasons))
-
-
 # =========================
 # 3. FinMind & Yahoo 抓取資料
 # =========================
@@ -1644,6 +1450,64 @@ def _intraday_score(row):
     elif turnover >= 100_000_000: score += 4
     return clamp(score)
 
+def _intraday_action(row):
+    """把盤後正式決策翻譯成盤中首頁的「行動語言」。不修改原始決策。"""
+    decision = str(row.get("決策", "")).strip()
+    pct = safe_float(row.get("即時漲跌%"), 0)
+    status = str(row.get("狀態", ""))
+    risk = str(row.get("風險", ""))
+    if "🟢 可買" in decision:
+        return "🟢 可買"
+    if "⚠️ 漲停勿追" in decision or "🟡 過熱觀察" in decision:
+        return "🟠 觀察"
+    if "🟡 觀察" in decision:
+        return "🟡 等待買點"
+    improving = (pct >= 2) or ("趨勢發動" in status) or ("強" in status and "弱" not in status)
+    if "🔴 不買" in decision:
+        if improving and "🔴 高" not in risk:
+            return "🟡 等待買點"
+        return "🔴 先跳過"
+    return "🟠 觀察" if pct >= 2 else "🔴 先跳過"
+
+
+def _intraday_change_label(row):
+    """只描述盤中行情，不冒充買進訊號。"""
+    pct = safe_float(row.get("即時漲跌%"), 0)
+    turnover = safe_float(row.get("成交金額"), 0)
+    if pct >= 5 and turnover >= 1_000_000_000:
+        return "🔥 強勢放量"
+    if pct >= 2:
+        return "⚡ 盤中轉強"
+    if pct <= -3:
+        return "🔴 盤中轉弱"
+    if pct > 0:
+        return "🟡 小幅偏強"
+    if pct < 0:
+        return "🟠 小幅轉弱"
+    return "🟡 盤中中性"
+
+
+def _intraday_action_rank(label):
+    return {"🟢 可買": 0, "🟡 等待買點": 1, "🟠 觀察": 2, "🔴 先跳過": 3}.get(label, 9)
+
+
+def _intraday_reason(row):
+    reasons = []
+    turnover = safe_float(row.get("成交金額"), 0)
+    change = str(row.get("盤中變化", ""))
+    if "強勢" in change or "轉強" in change:
+        reasons.append("盤中動能改善")
+    if turnover >= 1_000_000_000:
+        reasons.append("成交活躍")
+    elif turnover >= 500_000_000:
+        reasons.append("成交量能充足")
+    if "趨勢發動" in str(row.get("狀態", "")):
+        reasons.append("趨勢維持")
+    if not reasons:
+        reasons.append("等待更多盤中訊號確認")
+    return " · ".join(reasons[:3])
+
+
 def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N):
     snap = get_intraday_market_snapshot()
     if snap.empty: return pd.DataFrame()
@@ -1654,17 +1518,43 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N):
     out = out[out["成交金額"] >= INTRADAY_SCAN_MIN_TURNOVER].copy()
     if out.empty: return out
     out["盤中動能分"] = out.apply(_intraday_score, axis=1)
+
+    # 盤中只讀最近一次盤後研究；原則上 0 FinMind。
     saved = load_saved_scan()
     if isinstance(saved, dict) and isinstance(saved.get("out"), pd.DataFrame) and not saved["out"].empty:
-        base = saved["out"][[c for c in ["股票代碼", "買進分", "風險", "狀態", "決策"] if c in saved["out"].columns]].drop_duplicates("股票代碼")
+        keep = [c for c in [
+            "股票代碼", "買進分", "優先級", "風險", "狀態", "決策", "資料品質",
+            "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "趨勢", "說明", "理由"
+        ] if c in saved["out"].columns]
+        base = saved["out"][keep].drop_duplicates("股票代碼")
         out = out.merge(base, on="股票代碼", how="left")
-    out["基準買進分"] = pd.to_numeric(out.get("買進分"), errors="coerce")
-    out["基準買進分"] = out["基準買進分"].fillna(50)
-    out["即時調整分"] = (out["基準買進分"] * INTRADAY_BASE_WEIGHT + out["盤中動能分"] * INTRADAY_MOMENTUM_WEIGHT).round(1)
-    out["盤中訊號"] = np.select([out["即時漲跌%"] >= 5, out["即時漲跌%"] >= 2, out["即時漲跌%"] <= -3], ["🔥 強勢放量", "🟢 盤中轉強", "🔴 盤中轉弱"], default="🟡 中性")
-    out = out.sort_values(["即時調整分", "成交金額"], ascending=[False, False]).head(top_n).reset_index(drop=True)
+
+    if "買進分" in out.columns:
+        out["基準買進分"] = pd.to_numeric(out["買進分"], errors="coerce").fillna(50)
+    else:
+        out["基準買進分"] = 50.0
+    for _c, _default in [("風險", "🟡 中"), ("決策", ""), ("狀態", ""), ("資料品質", "")]:
+        if _c not in out.columns:
+            out[_c] = _default
+    out["即時調整分"] = (
+        out["基準買進分"] * INTRADAY_BASE_WEIGHT
+        + out["盤中動能分"] * INTRADAY_MOMENTUM_WEIGHT
+    ).round(1)
+    out["盤中 AI"] = out["即時調整分"]
+    out["盤中變化"] = out.apply(_intraday_change_label, axis=1)
+    out["行動"] = out.apply(_intraday_action, axis=1)
+    out["AI變化"] = (out["盤中 AI"] - out["基準買進分"]).round(1)
+    out["關注原因"] = out.apply(_intraday_reason, axis=1)
+
+    out["_action_rank"] = out["行動"].map(_intraday_action_rank).fillna(9)
+    out["_risk_rank"] = out["風險"].map({"🟢 低": 0, "🟡 中": 1, "🔴 高": 2}).fillna(1)
+    out["_improve_rank"] = np.where(out["即時漲跌%"] >= 2, 0, np.where(out["即時漲跌%"] > 0, 1, 2))
+    out = out.sort_values(
+        ["_action_rank", "_risk_rank", "_improve_rank", "盤中 AI", "成交金額"],
+        ascending=[True, True, True, False, False]
+    ).head(top_n).reset_index(drop=True)
     out.insert(0, "排名", np.arange(1, len(out)+1))
-    return out
+    return out.drop(columns=[c for c in ["_action_rank", "_risk_rank", "_improve_rank"] if c in out.columns])
 
 def save_intraday_scan(df):
     try:
@@ -2815,7 +2705,7 @@ st.markdown(f"""
   <div class="overview-card"><div class="overview-label">^TWII 最新</div><div class="overview-value">{_dash_latest}</div><div class="overview-sub">Yahoo benchmark / 市場位階</div></div>
 </div>
 <div class="scanner-launch-grid">
-  <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 盤中即時掃描</div><div class="scanner-launch-sub">即時行情 → 全市場快速篩選 → 套用最近盤後基準買進分。原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
+  <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 盤中即時掃描</div><div class="scanner-launch-sub">即時行情 → 找出今日盤中機會 → 套用最近盤後基準買進分。原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
   <div class="scanner-launch eod"><div class="scanner-launch-title">🌙 盤後深度掃描</div><div class="scanner-launch-sub">完整 PIT 研究 → 基本面 × 估值 × 籌碼 × 技術 → 建立明日研究池。</div><span class="launch-badge">FinMind 深度研究</span></div>
 </div>
 """, unsafe_allow_html=True)
@@ -3002,52 +2892,34 @@ MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策",
 
 # --- TAB：盤中即時掃描 ---
 with tab_intraday:
-    st.subheader("⚡ 盤中即時掃描")
-    st.caption("只把『值得看』的資訊放在第一層；完整數據點開單檔後才顯示。盤中原則上 0 FinMind Token。")
+    st.markdown("""
+    <div class="intraday-hero">
+        <div class="intraday-hero-title">🔥 今日盤中機會</div>
+        <div class="intraday-hero-sub">從全市場找出今天最值得注意的股票。首頁先告訴你「現在怎麼處理」，點開再看「為什麼」，完整原始資料留給進階使用者。</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     u = get_stock_universe()
     if u.empty:
         st.error("無法取得股票清單，請到「⚙️ 系統設定」檢查 API。")
     else:
-        # 第一層：一般使用者只需要知道市場有多少檔、資料時間與今日更新次數
-        live = st.session_state.get("intraday_scan_out")
-        saved_at = st.session_state.get("intraday_scan_saved_at", "")
-
-        if live is None:
-            cached_live = load_intraday_scan()
-            if isinstance(cached_live, dict):
-                live = cached_live.get("out")
-                st.session_state["intraday_scan_out"] = live
-                st.session_state["intraday_scan_saved_at"] = cached_live.get("saved_at")
-                saved_at = st.session_state.get("intraday_scan_saved_at", "")
-
-        scan_time = "尚未掃描"
-        if saved_at:
-            try:
-                scan_time = pd.to_datetime(saved_at).strftime("%H:%M")
-            except Exception:
-                scan_time = str(saved_at)[-8:-3] if len(str(saved_at)) >= 5 else str(saved_at)
+        cached_eod = load_saved_scan()
+        eod_time = cached_eod.get("saved_at", "尚無") if isinstance(cached_eod, dict) else "尚無"
+        cached_live = load_intraday_scan()
+        live_saved_at = cached_live.get("saved_at", "尚無") if isinstance(cached_live, dict) else "尚無"
+        current_saved_at = st.session_state.get("intraday_scan_saved_at") or live_saved_at
+        time_text = str(current_saved_at)[11:16] if current_saved_at and len(str(current_saved_at)) >= 16 else "—"
 
         st.markdown(f"""
-        <div class="intraday-overview-grid">
-          <div class="intraday-overview-card">
-            <div class="ioc-label">📊 掃描市場</div>
-            <div class="ioc-value">{len(u):,} <span>檔</span></div>
-          </div>
-          <div class="intraday-overview-card">
-            <div class="ioc-label">🕒 資料時間</div>
-            <div class="ioc-value">{scan_time}</div>
-          </div>
-          <div class="intraday-overview-card">
-            <div class="ioc-label">⚡ 今日更新</div>
-            <div class="ioc-value">0 <span>次</span></div>
-            <div class="ioc-sub">盤中不重打完整 FinMind</div>
-          </div>
+        <div class="intraday-kpi-grid">
+            <div class="intraday-kpi"><div class="intraday-kpi-label">📊 掃描市場</div><div class="intraday-kpi-value">{len(u):,} <span style="font-size:12px;color:var(--text-sub)">檔</span></div></div>
+            <div class="intraday-kpi"><div class="intraday-kpi-label">🕒 資料時間</div><div class="intraday-kpi-value">{time_text}</div></div>
+            <div class="intraday-kpi"><div class="intraday-kpi-label">⚡ 今日更新</div><div class="intraday-kpi-value">0 <span style="font-size:12px;color:var(--text-sub)">次 FinMind</span></div></div>
         </div>
         """, unsafe_allow_html=True)
 
-        if st.button("🔍 找出今日強勢股", type="primary"):
-            with st.spinner("連線交易所並找出今日強勢股…"):
+        if st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True):
+            with st.spinner("連線交易所並掃描市場中…"):
                 try:
                     live = run_intraday_scan(u, top_n=30)
                     save_intraday_scan(live)
@@ -3058,117 +2930,123 @@ with tab_intraday:
                     _log_api_error("run_intraday_scan", "-", exc)
                     st.error("盤中行情取得失敗；請稍後再試。這次沒有呼叫 FinMind。")
 
+        if st.session_state.get("intraday_scan_out") is None:
+            cached_live = load_intraday_scan()
+            if isinstance(cached_live, dict):
+                st.session_state["intraday_scan_out"] = cached_live.get("out")
+                st.session_state["intraday_scan_saved_at"] = cached_live.get("saved_at")
+
         live = st.session_state.get("intraday_scan_out")
-
         if isinstance(live, pd.DataFrame) and not live.empty:
-            # 第一層 A：AI 排序卡，只放前三名
-            display = live.copy()
-            display["AI分數"] = pd.to_numeric(display.get("即時調整分"), errors="coerce")
-            display["訊號"] = display.apply(_intraday_simple_signal, axis=1)
-            if "風險" in display.columns:
-                display["風險簡化"] = display["風險"].apply(_intraday_simple_risk)
-            else:
-                display["風險簡化"] = "—"
-            display["股票"] = display.apply(
-                lambda r: f"{str(r.get('股票代碼','')).strip()} {str(r.get('名稱','')).strip()}".strip(),
-                axis=1
-            )
-            display = display.sort_values(["AI分數", "成交金額"], ascending=[False, False]).reset_index(drop=True)
-            display["排名"] = np.arange(1, len(display) + 1)
+            saved_at = st.session_state.get("intraday_scan_saved_at", "")
+            if saved_at:
+                st.caption(f"🕒 最近一次盤中掃描：{saved_at} · 盤後研究：{eod_time}")
 
-            top3 = display.head(3)
+            top3 = live.head(3).copy()
+            st.markdown("### 🔥 今日值得關注")
+            st.caption("不是單純找漲最多，而是把盤後正式決策、風險與盤中變化放在一起，找出最值得花時間看的股票。")
 
-            st.markdown("""
-            <div class="ai-picks-title">
-              <div>
-                <div class="ai-picks-kicker">AI RANKING</div>
-                <div class="ai-picks-heading">🔥 今日盤中 AI 精選</div>
-              </div>
-              <div class="ai-picks-hint">先看這 3 檔，再決定要不要深入</div>
-            </div>
-            """, unsafe_allow_html=True)
+            cards = []
+            for _, r in top3.iterrows():
+                action = str(r.get("行動", "🟠 觀察"))
+                risk = str(r.get("風險", "🟡 中"))
+                action_cls = "ip-buy" if "🟢" in action else "ip-wait" if "🟡" in action else "ip-observe" if "🟠" in action else "ip-skip"
+                risk_cls = "ip-risk-low" if "🟢" in risk else "ip-risk-mid" if "🟡" in risk else "ip-risk-high"
+                ai = safe_float(r.get("盤中 AI"), np.nan)
+                base = safe_float(r.get("基準買進分"), np.nan)
+                delta = safe_float(r.get("AI變化"), np.nan)
+                if pd.isna(delta):
+                    delta_html = "—"
+                else:
+                    arrow = "▲" if delta > 0 else "▼" if delta < 0 else "＝"
+                    cls = "tw-up" if delta > 0 else "tw-down" if delta < 0 else "tw-flat"
+                    delta_html = f"{base:.0f} → {ai:.0f}　<span class='{cls}'>{arrow} {abs(delta):.1f}</span>"
+                price = safe_float(r.get("即時價"), np.nan)
+                pct = safe_float(r.get("即時漲跌%"), np.nan)
+                pct_cls = "tw-up" if pct > 0 else "tw-down" if pct < 0 else "tw-flat"
+                cards.append(f"""
+                <div class="intraday-pick">
+                    <div class="ip-rank">#{int(r.get('排名', 0))}</div>
+                    <div class="ip-name">{r.get('股票代碼','')} {r.get('名稱','')}</div>
+                    <div class="ip-score-row"><span class="ip-score">{ai:.0f}</span><span class="ip-score-label">盤中 AI</span></div>
+                    <div class="ip-badges"><span class="ip-action {action_cls}">{action}</span><span class="ip-risk {risk_cls}">{risk}</span><span class="ip-change">{r.get('盤中變化','🟡 盤中中性')}</span></div>
+                    <div class="ip-delta">{delta_html}</div>
+                    <div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span></div>
+                    <div class="ip-reason">{r.get('關注原因','等待更多盤中訊號確認')}</div>
+                </div>
+                """)
+            st.markdown("<div class='intraday-pick-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
 
-            card_cols = st.columns(3)
-            for i, (_, r) in enumerate(top3.iterrows()):
-                score = safe_float(r.get("AI分數"), 0)
-                risk = str(r.get("風險簡化", "—"))
-                signal = str(r.get("訊號", "🟡 觀察"))
-                with card_cols[i]:
+            st.markdown("### 🔎 查看分析")
+            for _, r in top3.iterrows():
+                code = r.get("股票代碼", "")
+                name = r.get("名稱", "")
+                action = r.get("行動", "🟠 觀察")
+                with st.expander(f"#{int(r.get('排名', 0))}　{code} {name}　｜　{action}", expanded=False):
+                    ai = safe_float(r.get("盤中 AI"), np.nan)
+                    base = safe_float(r.get("基準買進分"), np.nan)
+                    momentum = safe_float(r.get("盤中動能分"), np.nan)
+                    turnover = safe_float(r.get("成交金額"), np.nan)
+                    current = safe_float(r.get("即時價"), np.nan)
+                    pct = safe_float(r.get("即時漲跌%"), np.nan)
+                    delta = safe_float(r.get("AI變化"), np.nan)
+                    risk = r.get("風險", "—")
+                    formal_decision = r.get("決策", "—")
+                    status = r.get("狀態", "—")
+                    quality = r.get("資料品質", "—")
+                    delta_text = "—" if pd.isna(delta) else f"{delta:+.1f}"
+                    turnover_text = "—" if pd.isna(turnover) else f"{turnover/1e8:.2f} 億"
+                    current_text = "—" if pd.isna(current) else f"{current:.2f}"
+                    pct_text = "—" if pd.isna(pct) else f"{pct:+.1f}%"
+                    ai_text = "—" if pd.isna(ai) else f"{ai:.1f}"
+                    base_text = "—" if pd.isna(base) else f"{base:.1f}"
+                    mom_text = "—" if pd.isna(momentum) else f"{momentum:.1f}"
+                    st.markdown("<div class='intraday-detail-title'>🧠 AI 分析</div>", unsafe_allow_html=True)
                     st.markdown(f"""
-                    <div class="ai-pick-card">
-                      <div class="ai-pick-rank">#{int(r.get('排名', i+1))}</div>
-                      <div class="ai-pick-stock">{r.get('股票','')}</div>
-                      <div class="ai-pick-score">{score:.0f}<span> AI分</span></div>
-                      <div class="ai-pick-meta">
-                        <span class="ai-signal">{signal}</span>
-                        <span class="ai-risk">風險 {risk}</span>
-                      </div>
+                    <div class="intraday-detail-grid">
+                        <div class="intraday-detail-box"><div class="label">買進分</div><div class="value">{base_text}</div></div>
+                        <div class="intraday-detail-box"><div class="label">盤中動能</div><div class="value">{mom_text}</div></div>
+                        <div class="intraday-detail-box"><div class="label">盤中 AI</div><div class="value">{ai_text}</div></div>
+                        <div class="intraday-detail-box"><div class="label">成交金額</div><div class="value">{turnover_text}</div></div>
+                        <div class="intraday-detail-box"><div class="label">風險</div><div class="value">{risk}</div></div>
                     </div>
                     """, unsafe_allow_html=True)
+                    st.markdown(f"**🎯 現在怎麼處理：{action}**")
+                    st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}")
+                    st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
+                    st.markdown(f"**📈 現價：** {current_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
+                    st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
+                    if "🔴 不買" in str(formal_decision):
+                        st.info("盤後模型仍維持「不買」；盤中首頁的「等待買點」只代表今天值得重新觀察，不代表進場條件已成立。")
+                    elif "🟢 可買" in str(formal_decision):
+                        st.success("盤後模型已達正式進場門檻；仍請搭配風險與盤中狀態判斷，不把分數視為報酬保證。")
 
-            # 第一層 B：一般模式，只有決策需要的 6 欄
-            st.markdown('<div class="simple-mode-title">一般模式</div>', unsafe_allow_html=True)
-            st.caption("只回答一個問題：『哪幾檔值得看？』")
-
-            simple_cols = ["排名", "股票", "即時價", "AI分數", "訊號", "風險簡化"]
-            simple = display[[c for c in simple_cols if c in display.columns]].copy()
-            simple = simple.rename(columns={"即時價": "現價", "風險簡化": "風險"})
-            if "現價" in simple.columns:
-                simple["現價"] = pd.to_numeric(simple["現價"], errors="coerce")
-            if "AI分數" in simple.columns:
-                simple["AI分數"] = pd.to_numeric(simple["AI分數"], errors="coerce")
-
-            simple_cfg = {}
-            if hasattr(st, "column_config"):
-                simple_cfg["排名"] = st.column_config.NumberColumn("排名", width="small", format="%d")
-                simple_cfg["股票"] = st.column_config.TextColumn("股票", width="medium")
-                simple_cfg["現價"] = st.column_config.NumberColumn("現價", format="%.2f", width="small")
-                simple_cfg["AI分數"] = st.column_config.ProgressColumn(
-                    "AI分數", min_value=0, max_value=100, format="%.0f", width="small",
-                    help="盤後買進分 × 70% + 盤中動能 × 30%；不是勝率。"
-                )
-                simple_cfg["訊號"] = st.column_config.TextColumn("訊號", width="small")
-                simple_cfg["風險"] = st.column_config.TextColumn("風險", width="small")
-
+            st.markdown("### 📋 一般模式")
+            simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "盤中 AI", "行動", "風險"] if c in live.columns]
             st.dataframe(
-                simple,
-                use_container_width=True,
-                hide_index=True,
-                column_config=simple_cfg
+                live[simple_cols], use_container_width=True, hide_index=True,
+                column_config={
+                    "排名": st.column_config.NumberColumn("排名", width="small"),
+                    "股票代碼": st.column_config.TextColumn("股票", width="small"),
+                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                    "即時價": st.column_config.NumberColumn("現價", format="%.2f"),
+                    "盤中 AI": st.column_config.ProgressColumn("盤中 AI", min_value=0, max_value=100, format="%.0f"),
+                    "行動": st.column_config.TextColumn("行動", width="medium"),
+                    "風險": st.column_config.TextColumn("風險", width="small"),
+                },
             )
 
-            # 第二層：點開才看完整分析
-            st.markdown('<div class="detail-mode-title">第二層｜詳細分析</div>', unsafe_allow_html=True)
-            st.caption("點開任一檔，才顯示買進分、盤中動能、即時調整、成交金額與 AI 原因。")
-
-            for _, r in display.iterrows():
-                rank = int(r.get("排名", 0))
-                stock = str(r.get("股票", "")).strip()
-                score = safe_float(r.get("AI分數"), 0)
-                signal = str(r.get("訊號", "🟡 觀察"))
-                risk = str(r.get("風險簡化", "—"))
-                with st.expander(f"{rank}　{stock}　｜ AI分 {score:.0f}　｜ {signal}　｜ 風險 {risk}", expanded=False):
-                    render_intraday_detail(r)
-
-            # 進階使用者：原始完整表格收進容器，不干擾一般使用者
-            with st.expander("📋 進階：完整盤中資料表", expanded=False):
-                full_cols = [
-                    "排名", "股票代碼", "名稱", "即時價", "即時漲跌%",
-                    "成交金額", "基準買進分", "盤中動能分", "即時調整分",
-                    "盤中訊號", "風險", "狀態"
-                ]
-                full = display[[c for c in full_cols if c in display.columns]].copy()
-                st.dataframe(
-                    style_intraday_table(full),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=scan_column_config()
-                )
-
-            st.info("盤中 AI 分數沿用最近一次盤後研究的「基準買進分」，再以即時盤中動能做 70%／30% 調整；盤中掃描本身不重新執行完整 FinMind 研究。")
+            with st.expander("📊 進階：完整盤中資料", expanded=False):
+                advanced_cols = [c for c in [
+                    "排名", "股票代碼", "名稱", "即時價", "即時漲跌%", "成交金額",
+                    "基準買進分", "盤中動能分", "盤中 AI", "AI變化", "行動", "盤中變化",
+                    "決策", "風險", "狀態", "資料品質", "近1日漲跌%", "近5日漲跌%", "近20日漲跌%",
+                    "優先級", "量比", "趨勢", "說明"
+                ] if c in live.columns]
+                st.dataframe(style_intraday_table(live[advanced_cols]), use_container_width=True, hide_index=True)
+                st.caption("原始「決策」保留盤後模型結論；「行動」只是盤中首頁的使用者語言翻譯。盤中 AI = 70% 最近盤後買進分 + 30% 盤中動能分。")
         else:
-            st.info("尚未執行盤中掃描。按上方「🔍 找出今日強勢股」即可。")
-
+            st.info("尚未執行盤中掃描。按上方「🔍 掃描今日盤中機會」即可。")
 
 # --- TAB：盤後深度掃描 ---
 with tab_eod:
