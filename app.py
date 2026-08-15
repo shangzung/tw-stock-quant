@@ -10,6 +10,8 @@
 
 import time
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
@@ -26,8 +28,8 @@ from FinMind.data import DataLoader
 # 0. Streamlit & Mac CSS & 狀態初始化
 # =========================
 st.set_page_config(
-    page_title="台股 V8.3 量化決策系統",
-    page_icon="🍏",
+    page_title="台股量化羅盤 · Quant Compass",
+    page_icon="🧭",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -44,6 +46,8 @@ if "single_backtest_res" not in st.session_state: st.session_state["single_backt
 if "portfolio_backtest_res" not in st.session_state: st.session_state["portfolio_backtest_res"] = None
 if "wf_res" not in st.session_state: st.session_state["wf_res"] = None
 if "stock_lookup_res" not in st.session_state: st.session_state["stock_lookup_res"] = None
+if "watchlist_editor" not in st.session_state:
+    st.session_state["watchlist_editor"] = pd.DataFrame({"股票代碼": ["2330", "5351", "3481", "2317", "2454"]})
 
 # Mac 風格與手機端最佳化 CSS
 st.markdown("""
@@ -65,7 +69,10 @@ st.markdown("""
 
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, Helvetica, Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
     }
+    .block-container { padding-top: 1.6rem !important; max-width: 1240px !important; }
 
     /* 整體背景：明確指定主要容器與側邊欄，避免與系統深色模式衝突而造成文字被吃掉 */
     [data-testid="stAppViewContainer"], [data-testid="stHeader"], .main {
@@ -191,11 +198,112 @@ st.markdown("""
         font-weight: 600;
         border: 1px solid var(--border-c);
     }
+
+    /* ── Hero 主標題區：品牌識別 + 一句話說明這是做什麼的 ── */
+    .hero-banner {
+        position: relative;
+        margin: 4px 0 22px 0;
+        padding: 30px 34px;
+        border-radius: 20px;
+        overflow: hidden;
+        background:
+            radial-gradient(circle at 12% -10%, rgba(10,132,255,0.35), transparent 55%),
+            radial-gradient(circle at 100% 0%, rgba(48,209,88,0.18), transparent 45%),
+            linear-gradient(180deg, #1c1c1f 0%, #131315 100%);
+        border: 1px solid var(--border-c);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+    }
+    .hero-banner .hero-eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: var(--accent-blue);
+        text-transform: uppercase;
+        background: rgba(10,132,255,0.12);
+        border: 1px solid rgba(10,132,255,0.35);
+        padding: 4px 10px;
+        border-radius: 999px;
+        margin-bottom: 14px;
+    }
+    .hero-banner h1 {
+        margin: 0 0 8px 0 !important;
+        font-size: 34px !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.02em !important;
+        line-height: 1.15 !important;
+        background: linear-gradient(90deg, #ffffff 0%, #c8c8cf 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    .hero-banner .hero-sub {
+        font-size: 15px;
+        color: var(--text-sub);
+        line-height: 1.6;
+        max-width: 720px;
+    }
+    .hero-banner .hero-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+    }
+    .hero-banner .hero-tag {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-main);
+        background: var(--bg-card-2);
+        border: 1px solid var(--border-c);
+        padding: 5px 11px;
+        border-radius: 999px;
+    }
+
+    /* ── 分頁 Tabs：底線動畫、字重層次，更接近原生 macOS 分段控制項 ── */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        border-bottom: 1px solid var(--border-c);
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 14px !important;
+        padding: 10px 16px !important;
+        border-radius: 8px 8px 0 0 !important;
+        transition: color 0.15s ease-in-out, background-color 0.15s ease-in-out !important;
+    }
+    .stTabs [data-baseweb="tab"]:hover { color: var(--text-main) !important; background-color: var(--bg-card-2) !important; }
+    .stTabs [aria-selected="true"] { font-weight: 700 !important; }
+    .stTabs [data-baseweb="tab-highlight"] { background-color: var(--accent-blue) !important; height: 2.5px !important; }
+
+    /* 卡片式元件 hover 微浮起，呼應 macOS 介面互動細節 */
+    .pick-card, .regime-card, [data-testid="stExpander"] {
+        transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+    }
+    .pick-card:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(0,0,0,0.28); }
+
+    hr, [data-testid="stDivider"] { border-color: var(--border-c) !important; opacity: 0.6; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🍏 台股 V8.4 研究級量化決策系統")
-st.caption("基本面 × 估值 × 護城河 × 籌碼 × 技術 × Market Regime × ATR 風控 × 跨頁面快取")
+st.markdown("""
+<div class="hero-banner">
+    <span class="hero-eyebrow">🧭 Quant Compass · 研究級量化平台</span>
+    <h1>台股量化羅盤</h1>
+    <div class="hero-sub">
+        一站完成「今日該看哪幾檔」到「這個策略歷史上到底行不行」——
+        整合基本面、估值、護城河、籌碼與技術面，用同一套買進分邏輯做選股，並以
+        Point-in-Time 回測驗證，避免未來函數與資料偷看。
+    </div>
+    <div class="hero-tags">
+        <span class="hero-tag">📊 每日智慧選股</span>
+        <span class="hero-tag">🧪 Point-in-Time 回測</span>
+        <span class="hero-tag">💼 投組與換股成本</span>
+        <span class="hero-tag">📈 Benchmark 超額報酬</span>
+        <span class="hero-tag">🛡️ ATR 風控</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 # =========================
 # 1. API 與 Token 鎖定按鈕
@@ -225,10 +333,38 @@ else:
     except Exception:
         _token_status = ("warning", "⚠️ 使用免費額度")
 
+def has_finmind_secret():
+    """安全檢查是否設定了 FINMIND_TOKEN。
+    本機沒有 secrets.toml 檔案時，直接讀取 st.secrets 會丟出
+    StreamlitSecretNotFoundError；這裡統一攔截，沒有金鑰就當作沒有，不讓整個流程中斷。
+    """
+    try:
+        return "FINMIND_TOKEN" in st.secrets
+    except Exception:
+        return False
+
+
 API_SLEEP_SEC = 0.35
 
 def throttle():
     time.sleep(API_SLEEP_SEC)
+
+
+def parallel_map(items, fn, max_workers=3):
+    """Run independent stock tasks concurrently while keeping result order stable."""
+    items = list(items)
+    if not items:
+        return []
+    workers = max(1, min(int(max_workers or 1), len(items)))
+    if workers == 1:
+        return [fn(x) for x in items]
+    results = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="twq") as pool:
+        futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+    _flush_api_errors()
+    return results
 
 # FinMind 的台股日K／營收／財報／PER/PBR／法人買賣，都是「收盤後才更新一次」的資料
 # (平日約 15:00~21:00 陸續更新)，同一天內重複抓取只會拿到一模一樣的內容、卻白白燒掉
@@ -239,15 +375,28 @@ EOD_CACHE_TTL = 21600
 if "api_errors" not in st.session_state:
     st.session_state["api_errors"] = []
 
-# ✅ 錯誤紀錄工具 (將靜默錯誤記錄下來)
+_API_ERROR_LOCK = threading.Lock()
+_API_ERROR_BUFFER = []
+
 def _log_api_error(api_name, stock_id, exc):
-    st.session_state["api_errors"].append({
+    """Thread-safe error collector. Worker threads never mutate Streamlit session state directly."""
+    item = {
         "time": datetime.now().strftime("%H:%M:%S"),
         "api": api_name,
         "stock_id": stock_id,
         "error": f"{type(exc).__name__}: {exc}"
-    })
-    st.session_state["api_errors"] = st.session_state["api_errors"][-30:]
+    }
+    with _API_ERROR_LOCK:
+        _API_ERROR_BUFFER.append(item)
+        del _API_ERROR_BUFFER[:-50]
+
+def _flush_api_errors():
+    with _API_ERROR_LOCK:
+        pending = list(_API_ERROR_BUFFER)
+        _API_ERROR_BUFFER.clear()
+    if pending:
+        current = st.session_state.get("api_errors", [])
+        st.session_state["api_errors"] = (current + pending)[-30:]
 
 # =========================
 # 2. 基本工具
@@ -1049,7 +1198,9 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
                 "護城河": round(moat,1), "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
-                "過熱": "是" if overheat else "否", "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]), "daily": daily, "fund": fund, "moat_detail": moat_detail,
+                "過熱": "是" if overheat else "否", "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]),
+                "趨勢": [round(float(v), 2) for v in daily["close"].tail(20).pct_change().fillna(0).cumsum().add(1).tolist()],
+                "daily": daily, "fund": fund, "moat_detail": moat_detail,
                 "_pit_note": "財報可得日以財報日期+45天、營收以日期+15天作保守代理。"
                 }
     except Exception as e:
@@ -1139,14 +1290,19 @@ def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=10)
     if not equity:return None
     eq=pd.Series(dict(equity)); bench=get_benchmarks()
     metrics=performance_metrics(eq,trades,benchmark=bench)
-    metrics.update({"stock":stock_id,"equity":eq,"trades_detail":trades}); return metrics
+    metrics.update({"stock":stock_id,"equity":eq,"trades_detail":trades,"benchmarks":bench,"daily":daily,"hold_days":hold_days})
+    return metrics
 
 
-def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, slippage=0.0015, rebalance_days=20, progress_cb=None):
+def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, slippage=0.0015, rebalance_days=20, progress_cb=None, max_workers=3):
     data={}
-    for idx,s in enumerate(stocks):
+    def load_one(s):
         src=prepare_pit_sources(s,1500); d=add_technical_indicators(src["daily"])
-        if not d.empty: data[s]=src
+        return s, src if not d.empty else None
+    loaded = parallel_map(stocks, load_one, max_workers=max_workers)
+    for idx, item in enumerate(loaded):
+        s, src = item
+        if src is not None: data[s]=src
         if progress_cb: progress_cb((idx+1)/len(stocks))
     if not data:return None
     mkt=get_yahoo_taiex(); all_dates=sorted(set().union(*[set(pd.to_datetime(src["daily"]["date"])) for src in data.values()])); all_dates=pd.DatetimeIndex(all_dates)
@@ -1173,15 +1329,15 @@ def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, 
                     p0=safe_float(d.iloc[j-1]["close"]); p1=safe_float(d.iloc[j]["close"])
                     if p0>0: day_ret+=w*(p1/p0-1)
         value=value*(1+day_ret); equity.append((date,value))
-    eq=pd.Series(dict(equity)); metrics=performance_metrics(eq,[],benchmark=get_benchmarks()); metrics.update({"equity":eq,"trades_detail":[],"holdings":holdings,"turnover_cost_total":turnover_cost_total}); return metrics
+    eq=pd.Series(dict(equity)); bench=get_benchmarks(); metrics=performance_metrics(eq,[],benchmark=bench); metrics.update({"equity":eq,"trades_detail":[],"holdings":holdings,"turnover_cost_total":turnover_cost_total,"benchmarks":bench,"rebalance_days":rebalance_days}); return metrics
 
 
-def walk_forward_test(stocks, initial_capital, fee, tax, slippage, train_years=2, test_years=1):
+def walk_forward_test(stocks, initial_capital, fee, tax, slippage, hold_days=10, train_years=2, test_years=1):
     rows=[]
     if not stocks:return pd.DataFrame()
     # 以單股統一引擎做 out-of-sample：訓練期只用於報告，不調參；測試期完全獨立。
     for s in stocks:
-        r=backtest_single(s,initial_capital,fee,tax,slippage)
+        r=backtest_single(s,initial_capital,fee,tax,slippage,hold_days=hold_days)
         if r:
             rows.append({"股票":s,"CAGR":r.get("cagr",np.nan)*100,"MDD":r.get("mdd",np.nan)*100,"Sharpe":r.get("sharpe",np.nan),"OOS勝率":r.get("win_rate",np.nan),"交易次數":r.get("trades",0),"狀態":"OOS 回測完成"})
     return pd.DataFrame(rows)
@@ -1189,12 +1345,25 @@ def walk_forward_test(stocks, initial_capital, fee, tax, slippage, train_years=2
 # =========================
 # 8. UI Sidebar（只留下每個分頁都會用到的東西：自選股 + 大盤狀態）
 # =========================
-st.sidebar.subheader("📌 自選追蹤標的（供股票分析 / 歷史驗證使用）")
-input_text = st.sidebar.text_area("輸入自選股代碼", value="2330\n2317\n2454", height=120)
-stocks = clean_stock_list(input_text)
+st.sidebar.subheader("📌 自選觀察名單")
+st.sidebar.caption("可直接增刪列；代碼限 4 碼，這份名單會同步套用到「股票分析」與「歷史驗證」。")
+watch_df = st.sidebar.data_editor(
+    st.session_state["watchlist_editor"],
+    num_rows="dynamic",
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "股票代碼": st.column_config.TextColumn("股票代碼", help="輸入 4 碼台股代號", max_chars=4)
+    },
+    key="watchlist_editor_widget",
+)
+raw_watch = "\n".join(watch_df.get("股票代碼", pd.Series(dtype=str)).fillna("").astype(str).tolist())
+stocks = clean_stock_list(raw_watch)
+if len(stocks) != len(watch_df.dropna(how="all")):
+    st.sidebar.warning("有無效代碼已自動略過，請確認是否為 4 碼股票代號。")
 
 # 回測參數的預設值（實際輸入元件移到「⚙️ 系統設定」分頁）
-_settings_defaults = {"initial_capital": 1_000_000, "fee": 0.001425, "tax": 0.003, "slippage": 0.0015, "top_n": 5}
+_settings_defaults = {"initial_capital": 1_000_000, "fee": 0.001425, "tax": 0.003, "slippage": 0.0015, "top_n": 5, "hold_days": 10, "scan_workers": 3}
 for _k, _v in _settings_defaults.items():
     if f"cfg_{_k}" not in st.session_state:
         st.session_state[f"cfg_{_k}"] = _v
@@ -1257,6 +1426,11 @@ def render_settings_tab():
         st.session_state["cfg_tax"] = st.number_input("證交稅", min_value=0.0, max_value=0.02, value=st.session_state["cfg_tax"], format="%.6f")
         st.session_state["cfg_slippage"] = st.number_input("滑價假設", min_value=0.0, max_value=0.02, value=st.session_state["cfg_slippage"], format="%.6f")
     st.session_state["cfg_top_n"] = st.slider("投組持股上限 (檔)", 1, 20, st.session_state["cfg_top_n"])
+    c3, c4 = st.columns(2)
+    with c3:
+        st.session_state["cfg_hold_days"] = st.slider("📅 單股持有天數", 3, 30, st.session_state["cfg_hold_days"], 1, help="單股回測的 TIME 出場門檻。")
+    with c4:
+        st.session_state["cfg_scan_workers"] = st.slider("⚡ 平行掃描執行緒", 1, 6, st.session_state["cfg_scan_workers"], 1, help="提高速度也會增加同時 API 請求；遇到額度/連線問題可降回 1。")
 
     st.divider()
     st.subheader("🩺 API 診斷 (資料抓不到時點開)")
@@ -1281,6 +1455,7 @@ def render_settings_tab():
             except Exception as e:
                 st.error(f"❌ {label}：{type(e).__name__}: {e}")
 
+    _flush_api_errors()
     if st.session_state["api_errors"]:
         st.caption("最近的錯誤紀錄：")
         for err in reversed(st.session_state["api_errors"][-10:]):
@@ -1332,6 +1507,8 @@ fee = st.session_state["cfg_fee"]
 tax = st.session_state["cfg_tax"]
 slippage = st.session_state["cfg_slippage"]
 top_n = st.session_state["cfg_top_n"]
+hold_days = st.session_state["cfg_hold_days"]
+scan_workers = st.session_state["cfg_scan_workers"]
 
 
 def render_pick_card(row, rank=None):
@@ -1350,7 +1527,41 @@ def render_pick_card(row, rank=None):
     """, unsafe_allow_html=True)
 
 
-MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "決策", "狀態", "風險", "近1日漲跌%", "近5日漲跌%", "量比", "漲停狀態", "說明"]
+def style_scan_table(df):
+    styler = df.style
+    def color_ret(v):
+        try:
+            x=float(v)
+            if x>0: return "color:#34c759;font-weight:600;"
+            if x<0: return "color:#ff453a;font-weight:600;"
+        except Exception:
+            pass
+        return ""
+    for col in ["近1日漲跌%", "近5日漲跌%"]:
+        if col in df.columns: styler = styler.map(color_ret, subset=[col]) if hasattr(styler, "map") else styler.applymap(color_ret, subset=[col])
+    return styler
+
+
+def scan_column_config():
+    cfg = {}
+    if hasattr(st, "column_config"):
+        cfg["買進分"] = st.column_config.ProgressColumn("買進分", min_value=0, max_value=100, format="%.0f")
+        cfg["近1日漲跌%"] = st.column_config.NumberColumn("近1日漲跌%", format="%.1f%%")
+        cfg["近5日漲跌%"] = st.column_config.NumberColumn("近5日漲跌%", format="%.1f%%")
+        cfg["量比"] = st.column_config.NumberColumn("量比", format="%.2fx")
+        cfg["趨勢"] = st.column_config.LineChartColumn("20日趨勢", width="medium", help="近 20 個交易日累積相對走勢")
+        cfg["現價"] = st.column_config.NumberColumn("現價", format="%.2f")
+    return cfg
+
+
+def show_scan_dataframe(df):
+    if df is None or df.empty: return
+    shown = df.copy()
+    order = [c for c in ["名稱"] + MAIN_TABLE_COLS if c in shown.columns]
+    shown = shown[order]
+    st.dataframe(style_scan_table(shown), use_container_width=True, hide_index=True, column_config=scan_column_config())
+
+MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "決策", "狀態", "風險", "近1日漲跌%", "近5日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
 
 # --- TAB：今日選股 ---
 with tab_today:
@@ -1388,7 +1599,7 @@ with tab_today:
         st.caption(f"「{strength_choice}」約掃描 {scan_size} 檔（優先取今日成交金額最高的股票，抓不到今日快照時才退回全市場隨機取樣），"
                    f"通過流動性/資料完整性門檻的才進入技術初篩，再取前 {cfg['topk']} 檔做完整分析。")
 
-        _quota_limit = 600 if st.session_state.get("token_applied") or "FINMIND_TOKEN" in st.secrets else 300
+        _quota_limit = 600 if st.session_state.get("token_applied") or has_finmind_secret() else 300
         if est_calls > _quota_limit:
             st.warning(f"⚠️ 這一輪預估會用掉約 {est_calls} 次 FinMind 額度，"
                        f"超過目前每小時上限（{_quota_limit} 次）。如果掃到一半失敗，"
@@ -1398,45 +1609,61 @@ with tab_today:
 
         if st.button("🚀 開始今日掃描", type="primary"):
             scan_list = build_scan_list(uni, strength_choice)
-
             pre_rows = []
-            progress1 = st.progress(0)
-            status1 = st.empty()
-            for i, sid in enumerate(scan_list):
-                status1.text(f"第一層（流動性/資料完整性）＋技術初篩中... {sid} ({i+1}/{len(scan_list)})")
-                r = market_prefilter(sid)
-                if r: pre_rows.append(r)
-                progress1.progress((i + 1) / len(scan_list))
-            status1.empty()
+            with st.status(f"🔎 正在執行市場掃描… 0/{len(scan_list)}", expanded=False) as scan_status:
+                scan_status.write(f"預計掃描 {len(scan_list)} 檔，平行執行緒 {scan_workers}。")
+                pre_results = []
+                def _prefilter_one(sid):
+                    return market_prefilter(sid)
+                with ThreadPoolExecutor(max_workers=max(1, min(scan_workers, len(scan_list)))) as pool:
+                    futures = {pool.submit(_prefilter_one, sid): sid for sid in scan_list}
+                    done = 0
+                    for future in as_completed(futures):
+                        sid = futures[future]; done += 1
+                        try:
+                            r = future.result()
+                            if r: pre_results.append(r)
+                        except Exception as exc:
+                            _log_api_error("market_prefilter", sid, exc)
+                        scan_status.update(label=f"🔎 初篩中… {done}/{len(scan_list)}")
+                _flush_api_errors()
 
-            if pre_rows:
-                pre_df = pd.DataFrame(pre_rows).sort_values("初篩分", ascending=False)
-                st.caption(f"流動性過濾後剩 {len(pre_df)} / {len(scan_list)} 檔值得繼續分析。")
-                shortlist = pre_df.head(cfg["topk"])["股票代碼"].tolist()
+                if pre_results:
+                    pre_df = pd.DataFrame(pre_results).sort_values("初篩分", ascending=False)
+                    st.caption(f"流動性過濾後剩 {len(pre_df)} / {len(scan_list)} 檔值得繼續分析。")
+                    shortlist = pre_df.head(cfg["topk"])["股票代碼"].tolist()
+                    final_rows = []
+                    with st.status(f"🧠 完整分析中… 0/{len(shortlist)}", expanded=False) as final_status:
+                        def _calc_one(sid):
+                            return calculate_stock(sid, regime["regime"], regime)
+                        with ThreadPoolExecutor(max_workers=max(1, min(scan_workers, len(shortlist)))) as pool:
+                            futures = {pool.submit(_calc_one, sid): sid for sid in shortlist}
+                            done = 0
+                            for future in as_completed(futures):
+                                sid = futures[future]; done += 1
+                                try:
+                                    result = future.result()
+                                    if result: final_rows.append(result)
+                                    else: st.toast(f"⚠️ {sid} 資料不足或分析失敗", icon="⚠️")
+                                except Exception as exc:
+                                    _log_api_error("calculate_stock", sid, exc)
+                                    st.toast(f"⚠️ {sid} 資料抓取失敗", icon="⚠️")
+                                final_status.update(label=f"🧠 完整分析中… {done}/{len(shortlist)}")
+                    _flush_api_errors()
 
-                final_rows = []
-                progress2 = st.progress(0)
-                status2 = st.empty()
-                for i, sid in enumerate(shortlist):
-                    status2.text(f"完整分析中... {sid} ({i+1}/{len(shortlist)})")
-                    result = calculate_stock(sid, regime["regime"], regime)
-                    if result: final_rows.append(result)
-                    progress2.progress((i + 1) / len(shortlist))
-                status2.empty()
-
-                if final_rows:
-                    out = pd.DataFrame(final_rows).sort_values("買進分", ascending=False)
-                    name_map = universe_df.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in universe_df.columns else {}
-                    out.insert(1, "名稱", out["股票代碼"].map(name_map).fillna(""))
-                    candidates = out[out["決策"].isin(["🟢 可買"])]
-
-                    st.session_state["market_scan_out"] = out
-                    st.session_state["market_scan_candidates"] = candidates
-                    st.session_state["market_scan_top5"] = out.head(5)
+                    if final_rows:
+                        out = pd.DataFrame(final_rows).sort_values("買進分", ascending=False)
+                        name_map = universe_df.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in universe_df.columns else {}
+                        out.insert(1, "名稱", out["股票代碼"].map(name_map).fillna(""))
+                        candidates = out[out["決策"].isin(["🟢 可買"])]
+    
+                        st.session_state["market_scan_out"] = out
+                        st.session_state["market_scan_candidates"] = candidates
+                        st.session_state["market_scan_top5"] = out.head(5)
+                    else:
+                        st.error("完整分析階段沒有取得有效資料。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
                 else:
-                    st.error("完整分析階段沒有取得有效資料。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
-            else:
-                st.error("初篩沒有取得任何有效資料（可能全數被流動性門檻濾掉）。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
+                    st.error("初篩沒有取得任何有效資料（可能全數被流動性門檻濾掉）。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
 
         if st.session_state.get("market_scan_out") is not None:
             out_df = st.session_state["market_scan_out"]
@@ -1449,7 +1676,7 @@ with tab_today:
 
             st.subheader("📋 今日掃描結果（依買進分排序）")
             show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
-            st.dataframe(out_df[show_cols], use_container_width=True, hide_index=True)
+            show_scan_dataframe(out_df[show_cols])
 
             cands_df = st.session_state["market_scan_candidates"]
             st.subheader("🟢 今日可買")
@@ -1457,7 +1684,7 @@ with tab_today:
                 st.info("這次掃描沒有股票同時通過所有買進條件——今天先觀察就好。")
             else:
                 cols2 = ["名稱"] + MAIN_TABLE_COLS if "名稱" in cands_df.columns else MAIN_TABLE_COLS
-                st.dataframe(cands_df[cols2], use_container_width=True, hide_index=True)
+                show_scan_dataframe(cands_df[cols2])
 
 # --- TAB：股票分析 ---
 with tab_stock:
@@ -1493,17 +1720,24 @@ with tab_stock:
     else:
         if st.button("🚀 掃描自選清單", type="primary"):
             if not stocks:
-                st.error("請先在側邊欄輸入自選股代碼。")
+                st.error("請先在側邊欄加入至少一個有效的 4 碼股票代碼。")
             else:
                 rows = []
-                progress = st.progress(0)
-                status = st.empty()
-                for i, stock in enumerate(stocks):
-                    status.text(f"正在分析 {stock} ...")
-                    result = calculate_stock(stock, regime["regime"], regime)
-                    if result: rows.append(result)
-                    progress.progress((i + 1) / len(stocks))
-                status.empty()
+                with st.status(f"🔎 自選股分析中… 0/{len(stocks)}", expanded=False) as wl_status:
+                    with ThreadPoolExecutor(max_workers=max(1, min(scan_workers, len(stocks)))) as pool:
+                        futures = {pool.submit(calculate_stock, stock, regime["regime"], regime): stock for stock in stocks}
+                        done = 0
+                        for future in as_completed(futures):
+                            stock = futures[future]; done += 1
+                            try:
+                                result = future.result()
+                                if result: rows.append(result)
+                                else: st.toast(f"⚠️ {stock} 資料抓取失敗", icon="⚠️")
+                            except Exception as exc:
+                                _log_api_error("calculate_stock", stock, exc)
+                                st.toast(f"⚠️ {stock} 分析失敗", icon="⚠️")
+                            wl_status.update(label=f"🔎 自選股分析中… {done}/{len(stocks)}")
+                _flush_api_errors()
 
                 if rows:
                     out = pd.DataFrame(rows).sort_values("買進分", ascending=False)
@@ -1516,15 +1750,59 @@ with tab_stock:
         if st.session_state.get("candidate_out") is not None:
             out = st.session_state["candidate_out"]
             cands = st.session_state["candidate_cands"]
-            st.dataframe(out[MAIN_TABLE_COLS], use_container_width=True, hide_index=True)
+            show_scan_dataframe(out)
             st.subheader("🎯 真正候選池")
             if cands.empty: st.info("目前自選股中沒有同時通過所有買進條件的標的。")
-            else: st.dataframe(cands[MAIN_TABLE_COLS], use_container_width=True, hide_index=True)
+            else: show_scan_dataframe(cands)
 
 # --- TAB：歷史驗證 ---
 with tab_verify:
     st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
     sub_year, sub_week, sub_single, sub_portfolio, sub_wf = st.tabs(["⏳ 年份模擬", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward"])
+
+    def build_equity_benchmark_figure(result, title="資產曲線 vs Benchmark"):
+        eq = result.get("equity", pd.Series(dtype=float))
+        fig = go.Figure()
+        if eq is not None and len(eq):
+            base = float(eq.iloc[0])
+            fig.add_trace(go.Scatter(x=eq.index, y=eq.values, mode="lines", name="Strategy / Portfolio", line=dict(width=2.5)))
+            benches = result.get("benchmarks", {}) or {}
+            for name, series in benches.items():
+                b = pd.Series(series).reindex(eq.index).ffill().dropna()
+                if len(b) > 1 and b.iloc[0] != 0:
+                    norm = b / b.iloc[0] * base
+                    label = "^TWII / 大盤" if name == "^TWII" else "0050" if name == "0050.TW" else name
+                    fig.add_trace(go.Scatter(x=norm.index, y=norm.values, mode="lines", name=label, line=dict(dash="dot")))
+        fig.update_layout(title=title, template="plotly_dark", height=430, hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0))
+        return fig
+
+    def build_backtest_technical_figure(result):
+        from plotly.subplots import make_subplots
+        daily = result.get("daily", pd.DataFrame()).copy()
+        eq = result.get("equity", pd.Series(dtype=float))
+        fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.035, row_heights=[0.40,0.25,0.18,0.17], subplot_titles=("資產曲線 vs Benchmark", "價格 / MA20 / MA60", "MACD", "KD"))
+        if eq is not None and len(eq):
+            fig.add_trace(go.Scatter(x=eq.index,y=eq.values,mode="lines",name="Strategy",line=dict(width=2.5)),row=1,col=1)
+            for name, series in (result.get("benchmarks", {}) or {}).items():
+                b=pd.Series(series).reindex(eq.index).ffill().dropna()
+                if len(b)>1 and b.iloc[0]!=0:
+                    label="^TWII / 大盤" if name=="^TWII" else "0050" if name=="0050.TW" else name
+                    fig.add_trace(go.Scatter(x=b.index,y=b/b.iloc[0]*float(eq.iloc[0]),mode="lines",name=label,line=dict(dash="dot")),row=1,col=1)
+        if not daily.empty:
+            dd=daily.tail(260)
+            fig.add_trace(go.Scatter(x=dd["date"],y=dd["close"],name="Close",mode="lines"),row=2,col=1)
+            for col in ["MA20","MA60"]:
+                if col in dd: fig.add_trace(go.Scatter(x=dd["date"],y=dd[col],name=col,mode="lines"),row=2,col=1)
+            if "MACD" in dd:
+                hist=(dd["MACD"]-dd["MACD_signal"]).fillna(0)
+                fig.add_trace(go.Bar(x=dd["date"],y=hist,name="MACD Hist",opacity=0.55),row=3,col=1)
+                fig.add_trace(go.Scatter(x=dd["date"],y=dd["MACD"],name="MACD",mode="lines"),row=3,col=1)
+                fig.add_trace(go.Scatter(x=dd["date"],y=dd["MACD_signal"],name="Signal",mode="lines"),row=3,col=1)
+            if "K" in dd and "D" in dd:
+                fig.add_trace(go.Scatter(x=dd["date"],y=dd["K"],name="K",mode="lines"),row=4,col=1)
+                fig.add_trace(go.Scatter(x=dd["date"],y=dd["D"],name="D",mode="lines"),row=4,col=1)
+        fig.update_layout(title=f"{result.get('stock','')} 回測與技術面", template="plotly_dark", height=1000, hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0))
+        return fig
 
     def metric_grid(result, prefix=""):
         cols=st.columns(6)
@@ -1617,13 +1895,18 @@ with tab_verify:
         if stocks:
             selected=st.selectbox("選擇股票",stocks)
             if st.button("▶️ 執行單股回測",type="primary"):
-                with st.spinner("Point-in-Time 回測中..."):
-                    st.session_state["single_backtest_res"]=backtest_single(selected,initial_capital,fee,tax,slippage)
+                with st.status(f"📉 {selected} Point-in-Time 回測中…", expanded=False):
+                    st.session_state["single_backtest_res"]=backtest_single(selected,initial_capital,fee,tax,slippage,hold_days=hold_days)
             result=st.session_state.get("single_backtest_res")
             if result:
                 metric_grid(result); ai_explain(result)
-                bc=st.columns(2); bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A"); bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
-                eq=result["equity"]; fig=go.Figure(); fig.add_trace(go.Scatter(x=eq.index,y=eq.values,mode="lines",name="Strategy")); fig.update_layout(title=f"{result['stock']} 資產曲線",template="plotly_dark",height=420); st.plotly_chart(fig,use_container_width=True)
+                bc=st.columns(4)
+                bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A")
+                bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
+                bc[2].metric("Beta / TWII", f"{result.get('beta_TWII',np.nan):.2f}" if not pd.isna(result.get('beta_TWII',np.nan)) else "N/A")
+                bc[3].metric("持有天數", f"{result.get('hold_days',hold_days)} 天")
+                fig=build_backtest_technical_figure(result)
+                st.plotly_chart(fig,use_container_width=True)
                 with st.expander("📋 交易明細"): st.dataframe(pd.DataFrame(result.get("trades_detail",[])),use_container_width=True,hide_index=True)
                 with st.expander("🧠 AI 研究摘要"):
                     st.write("這個策略不是單看技術訊號，而是用目前系統的買進分與市場位階做歷史判斷；每個歷史日只使用當日以前的資料。")
@@ -1631,21 +1914,22 @@ with tab_verify:
     with sub_portfolio:
         st.subheader("💼 投組回測：真實成本 + 換股成本")
         if len(stocks)>=2 and st.button("💼 執行投資組合回測",type="primary"):
-            with st.spinner("計算共同資金池、換股與交易成本..."):
-                st.session_state["portfolio_backtest_res"]=portfolio_backtest(stocks,initial_capital,top_n,fee,tax,slippage)
+            with st.status("💼 計算共同資金池、換股與交易成本…", expanded=False):
+                st.session_state["portfolio_backtest_res"]=portfolio_backtest(stocks,initial_capital,top_n,fee,tax,slippage,max_workers=scan_workers)
         result=st.session_state.get("portfolio_backtest_res")
         if result:
             metric_grid(result); ai_explain(result,"投組解讀")
             bc=st.columns(2); bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A"); bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
-            eq=result["equity"]; fig=go.Figure(); fig.add_trace(go.Scatter(x=eq.index,y=eq.values,mode="lines",name="Portfolio")); fig.update_layout(title="共同資金池資產曲線",template="plotly_dark",height=420); st.plotly_chart(fig,use_container_width=True)
-            st.caption("投組換股時會依實際權重變化估算手續費、滑價與賣出證交稅；這比原 V8.3 的無摩擦投組模型更保守。")
+            fig=build_equity_benchmark_figure(result, title="共同資金池資產曲線 vs Benchmark")
+            st.plotly_chart(fig,use_container_width=True)
+            st.caption("投組換股時會依實際權重變化估算手續費、滑價與賣出證交稅；Benchmark 以相同期間起始值標準化，方便直接比較。")
 
     with sub_wf:
         st.subheader("🧪 Walk-Forward / Out-of-Sample")
         st.markdown("**目的：** 不讓同一段歷史同時扮演訓練與驗證角色。V8.4 先提供可重複的 OOS 報表框架；後續若加入參數最佳化，訓練區間只能用來選參數，測試區間完全封存。")
         if st.button("🧪 執行 OOS 驗證",type="primary"):
             with st.spinner("執行多標的 OOS 驗證..."):
-                st.session_state["wf_res"]=walk_forward_test(stocks,initial_capital,fee,tax,slippage)
+                st.session_state["wf_res"]=walk_forward_test(stocks,initial_capital,fee,tax,slippage,hold_days=hold_days)
         wf=st.session_state.get("wf_res")
         if wf is not None and not wf.empty:
             st.dataframe(wf,use_container_width=True,hide_index=True)
@@ -1653,4 +1937,4 @@ with tab_verify:
 
 # footer
 st.divider()
-st.caption("V8.4 Research Edition · Point-in-Time data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
+st.caption("台股量化羅盤 Quant Compass · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
