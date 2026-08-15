@@ -365,6 +365,13 @@ st.markdown("""
         --accent-green: #30d158;
         --accent-yellow: #ffd60a;
         --accent-red: #ff453a;
+        /* 台股標準：紅漲、綠跌；與決策/風險顏色分離 */
+        --tw-up: #ff453a;
+        --tw-down: #30d158;
+        --tw-flat: #a1a1a6;
+        --decision-buy: #30d158;
+        --decision-watch: #ffd60a;
+        --decision-stop: #ff453a;
         /* data_editor / dataframe 是 canvas 畫的 glide-data-grid，顏色主要靠 .streamlit/config.toml
            的 [theme] 設定；這裡的變數是給有支援讀 CSS 變數版本的備援，不是主要修法 */
         --gdg-bg-cell: #1c1c1e;
@@ -670,8 +677,78 @@ st.markdown("""
 
     .holding-card ul.hc-reasons { margin: 12px 0 0 0; padding: 0 0 0 18px; font-size: 13.5px; color: var(--text-sub); line-height: 1.7; }
 
+    /* =========================
+       V10 Taiwan Trading Terminal UI
+       ========================= */
+    .terminal-header {
+        display:flex; justify-content:space-between; align-items:center; gap:18px;
+        padding:10px 2px 18px 2px; margin-bottom:4px;
+    }
+    .brand-block { display:flex; align-items:center; gap:12px; }
+    .brand-mark {
+        width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+        color:#8ec5ff; border:1px solid #2b6aa3; background:radial-gradient(circle,#102b49 0%,#08111d 72%);
+        font-size:25px; box-shadow:0 0 22px rgba(10,132,255,.18);
+    }
+    .brand-title { font-size:22px; font-weight:800; letter-spacing:.02em; line-height:1.05; }
+    .brand-title span { color:#58a6ff; font-size:.82em; }
+    .brand-sub { color:var(--text-sub); font-size:12px; margin-top:4px; }
+    .header-status { color:var(--text-sub); font-size:11.5px; display:flex; align-items:center; gap:7px; }
+    .status-dot { width:7px; height:7px; border-radius:50%; background:var(--tw-up); box-shadow:0 0 8px rgba(255,69,58,.55); }
+
+    .market-overview { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin:4px 0 14px; }
+    .overview-card {
+        padding:13px 14px; border:1px solid var(--border-c); border-radius:12px;
+        background:linear-gradient(180deg,#151922 0%,#0d1016 100%); min-height:86px;
+    }
+    .overview-label { color:var(--text-sub); font-size:11px; font-weight:600; margin-bottom:8px; }
+    .overview-value { font-size:22px; font-weight:800; line-height:1.05; font-variant-numeric:tabular-nums; }
+    .overview-sub { margin-top:5px; font-size:11px; font-variant-numeric:tabular-nums; }
+    .tw-up { color:var(--tw-up) !important; }
+    .tw-down { color:var(--tw-down) !important; }
+    .tw-flat { color:var(--tw-flat) !important; }
+
+    .scanner-launch-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0 16px; }
+    .scanner-launch {
+        border:1px solid var(--border-c); border-radius:12px; padding:15px 17px;
+        background:linear-gradient(180deg,#11151d 0%,#0b0e13 100%);
+    }
+    .scanner-launch.live { border-color:rgba(255,69,58,.48); background:linear-gradient(180deg,rgba(90,12,12,.22),#0b0e13); }
+    .scanner-launch.eod { border-color:rgba(10,132,255,.5); background:linear-gradient(180deg,rgba(10,50,100,.22),#0b0e13); }
+    .scanner-launch-title { font-size:14px; font-weight:800; margin-bottom:4px; }
+    .scanner-launch.live .scanner-launch-title { color:var(--tw-up); }
+    .scanner-launch.eod .scanner-launch-title { color:#58a6ff; }
+    .scanner-launch-sub { color:var(--text-sub); font-size:11.5px; line-height:1.5; }
+    .scanner-launch .launch-badge { display:inline-block; margin-top:8px; padding:3px 8px; border-radius:999px; font-size:10.5px; border:1px solid var(--border-c); color:var(--text-sub); }
+
+    .section-bar {
+        display:flex; justify-content:space-between; align-items:center; gap:10px;
+        margin:12px 0 8px; padding:10px 12px; border:1px solid var(--border-c); border-radius:10px;
+        background:#0d1118;
+    }
+    .section-bar-title { font-size:13px; font-weight:800; }
+    .section-bar-sub { color:var(--text-sub); font-size:10.5px; }
+
+    .legend-card {
+        margin-top:12px; padding:12px 13px; border:1px solid var(--border-c); border-radius:10px;
+        background:linear-gradient(180deg,#14171d,#0e1014);
+    }
+    .legend-title { font-size:12px; font-weight:800; margin-bottom:8px; }
+    .legend-row { display:flex; align-items:center; gap:7px; font-size:11.5px; margin:5px 0; color:var(--text-sub); }
+    .legend-swatch { width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
+
+    .score-badge { display:inline-block; min-width:38px; padding:3px 7px; border-radius:6px; text-align:center; font-weight:800; color:#fff; background:#222b38; }
+    .decision-buy { color:#fff !important; background:rgba(48,209,88,.78); border-radius:5px; padding:3px 7px; font-weight:800; }
+    .decision-watch { color:#111 !important; background:rgba(255,214,10,.9); border-radius:5px; padding:3px 7px; font-weight:800; }
+    .decision-stop { color:#fff !important; background:rgba(255,69,58,.82); border-radius:5px; padding:3px 7px; font-weight:800; }
+
+    @media (max-width: 1100px) {
+        .market-overview { grid-template-columns:repeat(3,1fr); }
+    }
     @media (max-width: 900px) {
         .risk-profile-grid, .stat-chip-row, .price-target-row { grid-template-columns: 1fr 1fr; }
+        .market-overview, .scanner-launch-grid { grid-template-columns:1fr 1fr; }
+        .terminal-header { align-items:flex-start; flex-direction:column; }
     }
 
     /* ── 側邊欄自選觀察名單：chip 清單，取代原本的 data_editor 白底表格 ── */
@@ -738,23 +815,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("""
-<div class="hero-banner">
-    <div class="hero-topline">
-        <span class="hero-eyebrow">🧭 QUANT COMPASS · RESEARCH TERMINAL</span>
-        <span class="hero-live">● EOD / Point-in-Time</span>
+<div class="terminal-header">
+  <div class="brand-block">
+    <div class="brand-mark">✦</div>
+    <div>
+      <div class="brand-title">QUANT COMPASS <span>V10.0</span></div>
+      <div class="brand-sub">Smart Real-Time Scanner · 台股量化決策終端</div>
     </div>
-    <h1>台股量化羅盤</h1>
-    <div class="hero-sub">
-        從「今天看哪幾檔」到「歷史上是否值得信任」，用同一套多因子買進分，
-        再以交易成本、Benchmark 與 Out-of-Sample 驗證把故事拆開看。
-    </div>
-    <div class="hero-tags">
-        <span class="hero-tag">📊 多因子選股</span>
-        <span class="hero-tag">🧪 PIT 回測</span>
-        <span class="hero-tag">📈 超額報酬</span>
-        <span class="hero-tag">🛡️ ATR 風控</span>
-        <span class="hero-tag">💼 投組換股</span>
-    </div>
+  </div>
+  <div class="header-status">
+    <span class="status-dot"></span> 台股市場研究模式 · Point-in-Time / Unified Buy Score
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1036,16 +1107,57 @@ def limit_up_status(price, prev_close, day_high, day_low, daily_pct=None):
 def format_num(x, digits=1, suffix=""):
     return "—" if pd.isna(x) else f"{float(x):.{digits}f}{suffix}"
 
-def style_pnl(df):
+def _tw_color(v):
+    """台股價格/報酬配色：正數紅、負數綠、0 灰。"""
+    try:
+        x = float(v)
+        if pd.isna(x) or x == 0:
+            return "color:#a1a1a6;font-weight:600;"
+        return "color:#ff453a;font-weight:700;" if x > 0 else "color:#30d158;font-weight:700;"
+    except Exception:
+        return ""
+
+def style_market_returns(df, columns=None):
+    if df is None or df.empty:
+        return df
     styler = df.style
-    fn = lambda x: (
-        "color: #ff3b30; font-weight: 500;" if isinstance(x, float) and x < 0
-        else "color: #34c759; font-weight: 500;" if isinstance(x, float) and x > 0
-        else ""
-    )
-    if hasattr(styler, "map"):
-        return styler.map(fn)
-    return styler.applymap(fn)
+    cols = columns or [c for c in df.columns if any(k in str(c) for k in ["漲跌", "報酬", "獲利", "損益"]) and "MDD" not in str(c) and "回撤" not in str(c)]
+    for col in cols:
+        if col in df.columns:
+            try:
+                if hasattr(styler, "map"):
+                    styler = styler.map(_tw_color, subset=[col])
+                else:
+                    styler = styler.applymap(_tw_color, subset=[col])
+            except Exception:
+                pass
+    return styler
+
+def style_pnl(df):
+    return style_market_returns(df, [c for c in ["獲利(%)", "損益%", "未實現損益"] if c in df.columns])
+
+def style_scan_table(df):
+    styler = style_market_returns(df)
+    # 即時/盤後表格的價格與買進分維持清楚的金融終端顏色。
+    for col in ["買進分", "即時調整分", "基準買進分", "盤中動能分"]:
+        if col in df.columns:
+            def score_color(v):
+                try:
+                    x=float(v)
+                    if x>=85: return "color:#ffd60a;font-weight:800;"
+                    if x>=65: return "color:#f5f5f7;font-weight:700;"
+                    return "color:#a1a1a6;font-weight:600;"
+                except Exception:
+                    return ""
+            try:
+                styler = styler.map(score_color, subset=[col]) if hasattr(styler, "map") else styler.applymap(score_color, subset=[col])
+            except Exception:
+                pass
+    return styler
+
+def style_intraday_table(df):
+    return style_market_returns(df, [c for c in ["漲跌", "即時漲跌%"] if c in df.columns])
+
 
 # =========================
 # 3. FinMind & Yahoo 抓取資料
@@ -1819,6 +1931,8 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
         day_change_pct = (price / prev_close - 1) * 100 if not pd.isna(prev_close) and prev_close > 0 else np.nan
         ref5_close = safe_float(daily.iloc[-6].get("close")) if len(daily) >= 6 else np.nan
         change_5d_pct = (price / ref5_close - 1) * 100 if not pd.isna(ref5_close) and ref5_close > 0 else np.nan
+        ref20_close = safe_float(daily.iloc[-21].get("close")) if len(daily) >= 21 else np.nan
+        change_20d_pct = (price / ref20_close - 1) * 100 if not pd.isna(ref20_close) and ref20_close > 0 else np.nan
         limit_status = limit_up_status(price, prev_close, safe_float(x.get("max")), safe_float(x.get("min")), day_change_pct)
         decision = decision_label(buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"), market_regime=regime_dict["regime"])
         priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
@@ -1837,7 +1951,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
         reasons = build_reasons(decision, breakout_reasons, chip_detail, fund, val, status_label)
         return {"股票代碼": stock_id, "現價": round(price,2), "買進分": round(buy_score,1), "優先級": priority,
                 "狀態": status_label, "風險": risk, "資料品質": quality,
-                "近1日漲跌%": round(day_change_pct,2) if not pd.isna(day_change_pct) else np.nan, "近5日漲跌%": round(change_5d_pct,2) if not pd.isna(change_5d_pct) else np.nan,
+                "近1日漲跌%": round(day_change_pct,2) if not pd.isna(day_change_pct) else np.nan, "近5日漲跌%": round(change_5d_pct,2) if not pd.isna(change_5d_pct) else np.nan, "近20日漲跌%": round(change_20d_pct,2) if not pd.isna(change_20d_pct) else np.nan,
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
                 "護城河": round(moat,1), "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
@@ -2227,6 +2341,18 @@ st.sidebar.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 st.sidebar.caption("Token、API 診斷、回測費率等研究員參數請至「⚙️ 系統設定」分頁調整。")
+st.sidebar.markdown("""
+<div class="legend-card">
+  <div class="legend-title">🎨 顏色說明（台股標準）</div>
+  <div class="legend-row"><span class="legend-swatch" style="background:var(--tw-up)"></span><span><b style="color:var(--tw-up)">紅色</b>＝上漲／正報酬</span></div>
+  <div class="legend-row"><span class="legend-swatch" style="background:var(--tw-down)"></span><span><b style="color:var(--tw-down)">綠色</b>＝下跌／負報酬</span></div>
+  <div class="legend-row"><span class="legend-swatch" style="background:var(--tw-flat)"></span><span>灰色＝平盤／無變化</span></div>
+  <div style="height:1px;background:var(--border-c);margin:9px 0"></div>
+  <div class="legend-row"><span class="legend-swatch" style="background:var(--decision-buy)"></span><span>決策：可買</span></div>
+  <div class="legend-row"><span class="legend-swatch" style="background:var(--decision-watch)"></span><span>決策：觀察</span></div>
+  <div class="legend-row"><span class="legend-swatch" style="background:var(--decision-stop)"></span><span>決策：不可買</span></div>
+</div>
+""", unsafe_allow_html=True)
 
 
 def render_settings_tab():
@@ -2332,8 +2458,40 @@ def render_settings_tab():
 
 
 # =========================
-# 9. Tabs 顯示區（8 個分頁收斂成 4 個：今日選股 / 股票分析 / 歷史驗證 / 系統設定）
+# 9. Dashboard + Tabs
 # =========================
+# 這一區只讀快取/低成本資料，避免首頁載入就大量消耗 FinMind。
+try:
+    _dash_live = get_intraday_market_snapshot()
+except Exception:
+    _dash_live = pd.DataFrame()
+
+_dash_up = int((_dash_live.get("即時漲跌%", pd.Series(dtype=float)) > 0).sum()) if not _dash_live.empty else 0
+_dash_down = int((_dash_live.get("即時漲跌%", pd.Series(dtype=float)) < 0).sum()) if not _dash_live.empty else 0
+_dash_flat = int((_dash_live.get("即時漲跌%", pd.Series(dtype=float)) == 0).sum()) if not _dash_live.empty else 0
+_dash_turnover = pd.to_numeric(_dash_live.get("成交金額", pd.Series(dtype=float)), errors="coerce").sum() if not _dash_live.empty else np.nan
+_dash_latest = "—"
+try:
+    _tw = get_yahoo_taiex()
+    if _tw is not None and len(_tw):
+        _dash_latest = f"{float(_tw.iloc[-1]):,.0f}"
+except Exception:
+    pass
+
+st.markdown(f"""
+<div class="market-overview">
+  <div class="overview-card"><div class="overview-label">大盤位階</div><div class="overview-value">{regime.get('score',50):.0f}<span style="font-size:12px;color:var(--text-sub)"> / 100</span></div><div class="overview-sub {'tw-up' if regime.get('score',50)>=60 else 'tw-down'}">{regime.get('regime','UNKNOWN')} · {regime.get('message','')}</div></div>
+  <div class="overview-card"><div class="overview-label">台股即時樣本</div><div class="overview-value">{len(_dash_live):,}</div><div class="overview-sub"><span class="tw-up">上漲 {_dash_up:,}</span> · <span class="tw-down">下跌 {_dash_down:,}</span></div></div>
+  <div class="overview-card"><div class="overview-label">成交金額</div><div class="overview-value">{(_dash_turnover/1e8):,.0f}<span style="font-size:12px;color:var(--text-sub)"> 億</span></div><div class="overview-sub">交易所快照 · 免 FinMind</div></div>
+  <div class="overview-card"><div class="overview-label">上漲 / 下跌</div><div class="overview-value"><span class="tw-up">{_dash_up:,}</span> / <span class="tw-down">{_dash_down:,}</span></div><div class="overview-sub">平盤 {_dash_flat:,}</div></div>
+  <div class="overview-card"><div class="overview-label">^TWII 最新</div><div class="overview-value">{_dash_latest}</div><div class="overview-sub">Yahoo benchmark / 市場位階</div></div>
+</div>
+<div class="scanner-launch-grid">
+  <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 盤中即時掃描</div><div class="scanner-launch-sub">即時行情 → 全市場快速篩選 → 套用最近盤後基準買進分。原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
+  <div class="scanner-launch eod"><div class="scanner-launch-title">🌙 盤後深度掃描</div><div class="scanner-launch-sub">完整 PIT 研究 → 基本面 × 估值 × 籌碼 × 技術 → 建立明日研究池。</div><span class="launch-badge">FinMind 深度研究</span></div>
+</div>
+""", unsafe_allow_html=True)
+
 tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_settings = st.tabs([
     "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "⚙️ 系統設定"
 ])
@@ -2389,26 +2547,11 @@ def render_pick_card(row, rank=None):
             <span class="pick-name">{prefix}{row['股票代碼']} {name}</span>
             <span class="pick-score">{row['買進分']:.0f}</span>
         </div>
-        <div class="pick-sub">{row['決策']} ・ {row.get('狀態','')} ・ 風險 {row.get('風險','')} ・ 資料 {row.get('資料品質','—')} ・ 現價 {row['現價']} ・ 今日 {format_num(row.get('近1日漲跌%'), 1, '%')} ・ 5日 {format_num(row.get('近5日漲跌%'), 1, '%')}</div>
+        <div class="pick-sub">{row['決策']} ・ {row.get('狀態','')} ・ 風險 {row.get('風險','')} ・ 資料 {row.get('資料品質','—')} ・ 現價 {row['現價']} ・ 今日 <span class="{'tw-up' if safe_float(row.get('近1日漲跌%'),0)>0 else 'tw-down' if safe_float(row.get('近1日漲跌%'),0)<0 else 'tw-flat'}">{format_num(row.get('近1日漲跌%'), 1, '%')}</span> ・ 5日 <span class="{'tw-up' if safe_float(row.get('近5日漲跌%'),0)>0 else 'tw-down' if safe_float(row.get('近5日漲跌%'),0)<0 else 'tw-flat'}">{format_num(row.get('近5日漲跌%'), 1, '%')}</span> ・ 20日 <span class="{'tw-up' if safe_float(row.get('近20日漲跌%'),0)>0 else 'tw-down' if safe_float(row.get('近20日漲跌%'),0)<0 else 'tw-flat'}">{format_num(row.get('近20日漲跌%'), 1, '%')}</span></div>
         <div class="pick-sub">風險調整優先級：<b>{row.get('優先級', row.get('買進分', 0)):.0f}</b> / 100</div>
         <div class="pick-reason">{reasons_html}</div>
     </div>
     """, unsafe_allow_html=True)
-
-
-def style_scan_table(df):
-    styler = df.style
-    def color_ret(v):
-        try:
-            x=float(v)
-            if x>0: return "color:#34c759;font-weight:600;"
-            if x<0: return "color:#ff453a;font-weight:600;"
-        except Exception:
-            pass
-        return ""
-    for col in ["近1日漲跌%", "近5日漲跌%"]:
-        if col in df.columns: styler = styler.map(color_ret, subset=[col]) if hasattr(styler, "map") else styler.applymap(color_ret, subset=[col])
-    return styler
 
 
 def scan_column_config():
@@ -2422,6 +2565,7 @@ def scan_column_config():
         cfg["資料品質"] = st.column_config.TextColumn("資料品質", width="small")
         cfg["近1日漲跌%"] = st.column_config.NumberColumn("近1日漲跌%", format="%.1f%%")
         cfg["近5日漲跌%"] = st.column_config.NumberColumn("近5日漲跌%", format="%.1f%%")
+        cfg["近20日漲跌%"] = st.column_config.NumberColumn("近20日漲跌%", format="%.1f%%")
         cfg["量比"] = st.column_config.NumberColumn("量比", format="%.2fx")
         cfg["趨勢"] = st.column_config.LineChartColumn("20日趨勢", width="medium", help="近 20 個交易日累積相對走勢")
         cfg["現價"] = st.column_config.NumberColumn("現價", format="%.2f")
@@ -2435,7 +2579,7 @@ def show_scan_dataframe(df):
     shown = shown[order]
     st.dataframe(style_scan_table(shown), use_container_width=True, hide_index=True, column_config=scan_column_config())
 
-MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "近1日漲跌%", "近5日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
+MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
 
 # --- TAB：盤中即時掃描 ---
 with tab_intraday:
@@ -2471,8 +2615,8 @@ with tab_intraday:
             saved_at = st.session_state.get("intraday_scan_saved_at", "")
             if saved_at: st.caption(f"🕒 最近一次盤中掃描：{saved_at}")
             st.subheader("🔥 盤中最強候選")
-            cols = [c for c in ["排名","股票代碼","名稱","即時價","即時漲跌%","成交金額","盤中動能分","基準買進分","即時調整分","盤中訊號","風險","狀態"] if c in live.columns]
-            st.dataframe(live[cols], use_container_width=True, hide_index=True)
+            cols = [c for c in ["排名","股票代碼","名稱","即時價","即時漲跌%","近1日漲跌%","近5日漲跌%","成交金額","基準買進分","盤中動能分","即時調整分","盤中訊號","風險","狀態"] if c in live.columns]
+            st.dataframe(style_intraday_table(live[cols]), use_container_width=True, hide_index=True)
             st.info("「基準買進分」來自最近一次盤後深度研究；「即時調整分」只用盤中行情做動態調整。因此盤中掃描不會重新呼叫完整 FinMind 研究資料。若尚無盤後結果，基準分暫以 50 計。")
         else:
             st.info("尚未執行盤中掃描。按上方「一鍵掃描現在市場」即可。")
@@ -3127,4 +3271,4 @@ with tab_verify:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V10.0 · Smart Real-Time Scanner · Research Edition · Point-in-Time Data · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework · Rule-based AI Explanation")
+st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
