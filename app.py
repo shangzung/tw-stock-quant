@@ -2594,8 +2594,18 @@ tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_help, tab_settin
 
 # --- TAB：使用說明 ---
 with tab_help:
-    st.subheader("📖 Quant Compass V10 使用說明")
+    st.subheader("📖 Quant Compass V10.2 實戰使用說明")
     st.caption("給第一次使用的人：不用懂量化，也能知道這個系統在做什麼、什麼時候按哪個按鈕。")
+
+    st.info("""
+    **每天只需要三步：**
+
+    🌙 盤後深度：找明天值得研究的股票  
+    ⚡ 盤中即時：確認市場是否真的有買盤  
+    🧠 策略健康：查看這套方法長期是否有效
+
+    系統不是預測股票，而是用固定規則找出條件較佳的股票。
+    """)
 
     st.markdown("""
     <div class="terminal-grid">
@@ -2654,7 +2664,24 @@ with tab_help:
         所以看到紅色時，要先看它是「價格上漲」還是「高風險」；兩者的意義不同。
         """)
 
-    with st.expander("⚠️ 第五步：看到『可買』是不是就一定要買？"):
+    
+    with st.expander("🧠 第六步：策略健康檢查怎麼看？", expanded=False):
+        st.markdown("""
+        系統會自動保存每天盤中與盤後產生的選股訊號。
+
+        後續會追蹤：
+        - 買進後 5 日結果
+        - 買進後 10 日結果
+        - 買進後 20 日結果
+
+        用來回答：
+
+        **「這套買進分邏輯過去到底有沒有優勢？」**
+
+        不需要重新掃描全市場，也不會大量消耗 FinMind Token。
+        """)
+
+with st.expander("⚠️ 第五步：看到『可買』是不是就一定要買？"):
         st.markdown("""
         **不是。**「可買」代表模型認為條件同時成立的程度較高，不代表未來一定上漲。
 
@@ -3236,8 +3263,8 @@ with tab_holdings:
         st.caption("以上為量化規則參考建議（依買進分、趨勢強度 ADX、波動度 ATR 與你選擇的風險偏好動態計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
 
 with tab_verify:
-    st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
-    sub_year, sub_week, sub_single, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
+    st.caption("策略健康檢查：追蹤每日實際產生的選股訊號，確認買進分是否在真實市場中有效。")
+    sub_strategy = st.container()
 
     def build_equity_benchmark_figure(result, title="資產曲線 vs Benchmark"):
         eq = result.get("equity", pd.Series(dtype=float))
