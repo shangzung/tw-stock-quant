@@ -338,6 +338,7 @@ if "candidate_cands" not in st.session_state: st.session_state["candidate_cands"
 if "single_backtest_res" not in st.session_state: st.session_state["single_backtest_res"] = None
 if "portfolio_backtest_res" not in st.session_state: st.session_state["portfolio_backtest_res"] = None
 if "wf_res" not in st.session_state: st.session_state["wf_res"] = None
+if "ai_scorecard" not in st.session_state: st.session_state["ai_scorecard"] = None
 if "stock_lookup_res" not in st.session_state: st.session_state["stock_lookup_res"] = None
 if "watchlist_codes" not in st.session_state:
     st.session_state["watchlist_codes"] = ["2330", "5351", "3481", "2317", "2454"]
@@ -2589,7 +2590,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_help, tab_settings = st.tabs([
-    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "📜 歷史驗證", "📖 使用說明", "⚙️ 系統設定"
+    "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "🏆 AI戰績", "📖 使用說明", "⚙️ 系統設定"
 ])
 
 # --- TAB：使用說明 ---
@@ -3236,7 +3237,31 @@ with tab_holdings:
         st.caption("以上為量化規則參考建議（依買進分、趨勢強度 ADX、波動度 ATR 與你選擇的風險偏好動態計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
 
 with tab_verify:
-    st.caption("研究級驗證：所有歷史訊號都以當時可取得資料計算，回測交易成本與 Benchmark 一併納入。")
+    st.subheader("🏆 AI 選股實戰成績")
+    st.caption("不是重新選股，而是檢查過去 AI 推薦是否真的有效。此功能讀取已保存訊號，不重新掃描全市場，降低 API 消耗。")
+    log = load_research_log()
+    if log.empty:
+        st.info("尚未累積 AI 選股紀錄。請先使用『盤後深度』，系統會自動保存每日訊號。")
+    else:
+        if st.button("🚀 產生 AI 成績單", type="primary"):
+            with st.status("正在計算 AI 過去推薦的實際表現…", expanded=False):
+                detail, cal = build_forward_calibration(log, max_samples=min(500, len(log)))
+                st.session_state["ai_scorecard"] = (detail, cal)
+        score = st.session_state.get("ai_scorecard")
+        if score:
+            detail, cal = score
+            if detail is not None and not detail.empty:
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("驗證樣本", f"{len(detail):,}")
+                v = pd.to_numeric(detail.get("10D報酬"), errors="coerce").dropna()
+                c2.metric("10日勝率", f"{(v>0).mean()*100:.1f}%" if len(v) else "N/A")
+                c3.metric("10日平均報酬", f"{v.mean()*100:.2f}%" if len(v) else "N/A")
+                c4.metric("AI可信度", calibration_reliability(len(detail)))
+                st.markdown("### 📊 AI 分數可靠度")
+                if cal is not None and not cal.empty:
+                    st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
+                st.caption("此成績代表歷史訊號統計，不代表未來保證報酬。")
+    
     sub_year, sub_week, sub_single, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
 
     def build_equity_benchmark_figure(result, title="資產曲線 vs Benchmark"):
@@ -3463,4 +3488,4 @@ with tab_verify:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
+st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · AI Scorecard · OOS Framework")
