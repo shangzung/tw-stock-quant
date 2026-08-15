@@ -4,4 +4,4 @@ numpy
 plotly
 ta
 yfinance
-FinMind
+FinMind==2.0.6
