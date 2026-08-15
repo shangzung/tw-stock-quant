@@ -95,15 +95,34 @@ def clear_saved_scan():
         return False
 
 
+def _coerce_holdings_dtypes(df):
+    """確保庫存表格的欄位型別跟 column_config 一致（代碼=文字、股數/成本=數字），
+    不然 st.data_editor 在型別對不上時會直接丟出 StreamlitAPIException 讓整頁掛掉。"""
+    if df is None or df.empty:
+        return pd.DataFrame({
+            "股票代碼": pd.Series(dtype="object"),
+            "持有股數": pd.Series(dtype="float64"),
+            "持有成本": pd.Series(dtype="float64"),
+        })
+    out = df.copy()
+    if "股票代碼" not in out.columns: out["股票代碼"] = pd.Series(dtype="object")
+    if "持有股數" not in out.columns: out["持有股數"] = pd.Series(dtype="float64")
+    if "持有成本" not in out.columns: out["持有成本"] = pd.Series(dtype="float64")
+    out["股票代碼"] = out["股票代碼"].astype("object")
+    out["持有股數"] = pd.to_numeric(out["持有股數"], errors="coerce")
+    out["持有成本"] = pd.to_numeric(out["持有成本"], errors="coerce")
+    return out[["股票代碼", "持有股數", "持有成本"]]
+
+
 def load_saved_holdings():
     try:
         if HOLDINGS_FILE.exists():
             data = json.loads(HOLDINGS_FILE.read_text(encoding="utf-8"))
             if data:
-                return pd.DataFrame(data)
+                return _coerce_holdings_dtypes(pd.DataFrame(data))
     except Exception:
         pass
-    return pd.DataFrame({"股票代碼": [], "持有股數": [], "持有成本": []})
+    return _coerce_holdings_dtypes(None)
 
 
 def save_holdings_to_disk(df):
