@@ -594,6 +594,43 @@ st.markdown("""
     @media (max-width: 900px) { .terminal-grid { grid-template-columns:1fr 1fr; } }
     @media (max-width: 560px) { .terminal-grid { grid-template-columns:1fr; } }
 
+    /* ── 使用說明：單頁手冊（不用一路點展開，手機上下滑就能看完全部） ── */
+    .help-doc { display:flex; flex-direction:column; gap:12px; }
+    .help-section {
+        padding: 16px 18px;
+        border: 1px solid var(--border-c);
+        border-radius: 14px;
+        background: linear-gradient(180deg, #1c1c1f 0%, #151517 100%);
+    }
+    .help-section.help-highlight {
+        border-color: rgba(48,209,88,0.35);
+        background: linear-gradient(180deg, rgba(48,209,88,0.10) 0%, #151517 70%);
+    }
+    .help-section-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+    .help-num {
+        flex: 0 0 auto; width:26px; height:26px; border-radius:50%;
+        background: rgba(10,132,255,0.15); border:1px solid rgba(10,132,255,0.4);
+        color: var(--accent-blue); font-weight:800; font-size:12.5px;
+        display:flex; align-items:center; justify-content:center;
+    }
+    .help-section-title { font-size:15.5px; font-weight:700; color:var(--text-main); line-height:1.35; }
+    .help-body { font-size:13.8px; line-height:1.75; color:var(--text-sub); }
+    .help-body b, .help-body strong { color:var(--text-main); }
+    .help-body ol, .help-body ul { margin:6px 0 4px 20px; padding:0; }
+    .help-body li { margin-bottom:3px; }
+    .help-quicklist { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .help-chip {
+        font-size:12px; font-weight:600; padding:6px 12px; border-radius:999px;
+        border:1px solid var(--border-c); background: var(--bg-card-2); color: var(--text-main);
+        white-space:nowrap;
+    }
+    @media (max-width: 560px) {
+        .help-section { padding: 13px 14px; border-radius:12px; }
+        .help-section-title { font-size:14.5px; }
+        .help-body { font-size:13.2px; }
+        .help-chip { font-size:11.5px; padding:5px 10px; }
+    }
+
     .hero-banner .hero-eyebrow {
         display: inline-flex;
         align-items: center;
@@ -3197,10 +3234,10 @@ tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_advanced, tab_he
     "⚡ 盤中即時", "🌙 盤後深度", "🔍 股票分析", "🩺 庫存健康", "🏆 AI戰績", "🔬 進階研究工具（研究用途）", "📖 使用說明", "⚙️ 系統設定"
 ])
 
-# --- TAB：使用說明 ---
+# --- TAB：使用說明（單頁手冊：只有一個說明，手機上下滑就能看完，不用一路點展開） ---
 with tab_help:
     st.subheader("📖 Quant Compass V10.2 AI Scorecard 使用說明")
-    st.caption("給第一次使用的人：不用懂量化，也能知道這個系統在做什麼、什麼時候按哪個按鈕。")
+    st.caption("給第一次使用的人：不用懂量化，也能知道這個系統在做什麼、什麼時候按哪個按鈕。全部內容都在這一頁，往下滑就好。")
 
     st.markdown("""
     <div class="terminal-grid">
@@ -3209,83 +3246,105 @@ with tab_help:
       <div class="terminal-card"><div class="tc-label">核心分數</div><div class="tc-value">買進分</div><div class="tc-sub">越高代表目前條件越完整；不是勝率，也不是保證獲利。</div></div>
       <div class="terminal-card"><div class="tc-label">資料原則</div><div class="tc-value">PIT</div><div class="tc-sub">歷史驗證不使用當時尚未知道的未來資料。</div></div>
     </div>
+
+    <div class="help-doc">
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">1</div><div class="help-section-title">每天晚上要做什麼？</div></div>
+        <div class="help-body">
+          按「🌙 盤後深度」→「執行盤後深度掃描」，系統會依序做：
+          <ol>
+            <li>從上市＋上櫃股票中建立掃描清單。</li>
+            <li>先看流動性與技術條件，避免把 FinMind 額度浪費在冷門股票。</li>
+            <li>從候選股中挑出前段班。</li>
+            <li>一次批次抓基本面、營收、估值、法人與日 K。</li>
+            <li>用同一套「買進分」排序。</li>
+            <li>產生「明日最值得看」與「明日可優先研究」名單。</li>
+          </ol>
+          <b>簡單說：晚上是在回答「明天有哪些股票值得我看？」</b>
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">2</div><div class="help-section-title">隔天盤中要做什麼？</div></div>
+        <div class="help-body">
+          按「⚡ 盤中即時」→「一鍵掃描現在市場」。盤中主要看即時行情、成交量、漲跌與動能，並套用昨晚留下的研究結果。
+          它的目的不是重新做一遍財報研究，而是回答：<b>「昨晚看好的股票，今天市場真的有沒有在買？」</b>
+          盤中模式原則上不重新打完整 FinMind 研究資料，所以可以比盤後更頻繁使用。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">買進分到底是什麼？</div></div>
+        <div class="help-body">
+          買進分是把多個條件整理成一個容易排序的分數，包含：<b>基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境</b>。
+          例如 90 分代表「目前條件整體很強」，80 分代表「條件也不錯」，但<b>90 分不是 90% 勝率</b>。
+          所以實際操作還要一起看：<b>風險、資料品質、狀態、是否過熱、是否接近漲停</b>。
+          買進分回答「條件強不強」，風險分則回答「看錯了代價多大」——兩者是分開算的。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">4</div><div class="help-section-title">台股顏色怎麼看？</div></div>
+        <div class="help-body">
+          <b>價格／報酬：</b> 🔴 紅色＝上漲、🟢 綠色＝下跌、⚪ 灰色＝平盤。<br/>
+          <b>決策：</b> 🟢 可買、🟡 觀察、🔴 不買。<br/>
+          <b>風險：</b> 🟢 低風險、🟡 中風險、🔴 高風險。<br/>
+          <b>狀態標籤：</b> 🟢低位起漲／🟢趨勢發動／🟡強勢追蹤／🟠短線過熱／🔴趨勢轉弱（強勢和過熱不是同一件事）。<br/>
+          所以看到紅色時，要先看它是「價格上漲」還是「高風險」；兩者的意義不同。
+        </div>
+      </div>
+
+      <div class="help-section help-highlight">
+        <div class="help-section-head"><div class="help-num">5</div><div class="help-section-title">看到『可買』是不是就一定要買？</div></div>
+        <div class="help-body">
+          <b>不是。</b>「可買」代表模型認為條件同時成立的程度較高，不代表未來一定上漲。
+          實戰建議依序確認：<b>買進分 → 風險 → 資料品質 → 是否過熱 → 盤中動能 → 最後才由你決定是否下單。</b>
+          漲停附近會標示 ⚠️ 漲停勿追。這套系統目前定位是<b>量化研究與交易決策輔助</b>，不是自動下單機器人。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">6</div><div class="help-section-title">FinMind Token 是做什麼？怎麼省？</div></div>
+        <div class="help-body">
+          FinMind 主要負責盤後研究資料，例如日 K、營收、財報、PER/PBR、法人資料。
+          盤後完整研究是<b>批次抓取</b>：候選股票的完整資料一次分批取得，再逐檔計算分數，不會每一檔股票重複打好幾次 API。
+          <b>建議：</b>有 Token 就放在「⚙️ 系統設定」；盤中掃描則盡量不消耗 FinMind 額度。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">7</div><div class="help-section-title">這個系統每天真正要看的只有什麼？</div></div>
+        <div class="help-body">
+          如果不想看一堆數字，只看這 6 個，其他指標都是「需要深入研究時再打開」：
+          <div class="help-quicklist">
+            <span class="help-chip">① 買進分</span>
+            <span class="help-chip">② 狀態</span>
+            <span class="help-chip">③ 風險</span>
+            <span class="help-chip">④ 資料品質</span>
+            <span class="help-chip">⑤ 近1／5／20日漲跌</span>
+            <span class="help-chip">⑥ 盤中動能</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">版本重點與尚未做到的事</div></div>
+        <div class="help-body">
+          <ul>
+            <li><b>買進分是唯一的主分數。</b>綜合分、起漲分等內部因子仍在計算，但只出現在「股票分析」的詳細分析裡，不會同時丟兩個分數給你。</li>
+            <li><b>雙掃描器。</b>盤中即時與盤後深度共用同一套核心研究引擎，但資料層分開；盤中優先 0 FinMind，盤後才做完整深度分析。</li>
+            <li><b>全市場掃描是真的全市場。</b>優先用交易所官方 OpenAPI 的「今日全市場成交金額」快照排出最活躍的候選名單（免費、不吃 FinMind 額度），抓不到快照時才退回全市場均勻隨機取樣。</li>
+            <li><b>一週實測驗證的是買進分本身</b>，用一模一樣的公式與門檻回推歷史訊號，不是另一套簡化規則。</li>
+          </ul>
+          買進分是內部多因子加權後的「目前條件強度」，不是未來上漲機率，也不是獲利保證；真正要驗證「能不能持續漲」，要看歷史驗證與之後的實際結果。
+          <br/><br/>
+          <b>尚未做到、留給下一版的事：</b>把買進分做成真正的「歷史勝率校準」（例如「買進分 85–89 的標的過去 5 日勝率 68%」），需要每天記錄當天的買進分、持續累積很多天才能算出可信的統計，這需要跨 session 的資料儲存，不是單一次 Streamlit session 能做到的，先誠實列在這裡，之後再做。
+        </div>
+      </div>
+
+    </div>
     """, unsafe_allow_html=True)
-
-    with st.expander("🧭 第一步：每天晚上要做什麼？", expanded=True):
-        st.markdown("""
-        **按「🌙 盤後深度」→「執行盤後深度掃描」**
-
-        系統會依序做：
-        1. 從上市＋上櫃股票中建立掃描清單。
-        2. 先看流動性與技術條件，避免把 FinMind 額度浪費在冷門股票。
-        3. 從候選股中挑出前段班。
-        4. 一次批次抓基本面、營收、估值、法人與日 K。
-        5. 用同一套「買進分」排序。
-        6. 產生「明日最值得看」與「明日可優先研究」名單。
-
-        **簡單說：晚上是在回答「明天有哪些股票值得我看？」**
-        """)
-
-    with st.expander("⚡ 第二步：隔天盤中要做什麼？"):
-        st.markdown("""
-        **按「⚡ 盤中即時」→「一鍵掃描現在市場」**。
-
-        盤中主要看即時行情、成交量、漲跌與動能，並套用昨晚留下的研究結果。
-        它的目的不是重新做一遍財報研究，而是回答：
-
-        **「昨晚看好的股票，今天市場真的有沒有在買？」**
-
-        盤中模式原則上不重新打完整 FinMind 研究資料，所以可以比盤後更頻繁使用。
-        """)
-
-    with st.expander("🧠 第三步：買進分到底是什麼？"):
-        st.markdown("""
-        買進分是把多個條件整理成一個容易排序的分數，包含：
-
-        **基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境**。
-
-        例如 90 分代表「目前條件整體很強」，80 分代表「條件也不錯」，但**90 分不是 90% 勝率**。
-        所以實際操作還要一起看：**風險、資料品質、狀態、是否過熱、是否接近漲停**。
-        """)
-
-    with st.expander("🎨 第四步：台股顏色怎麼看？"):
-        st.markdown("""
-        **價格／報酬：** 🔴 紅色＝上漲、🟢 綠色＝下跌、⚪ 灰色＝平盤。
-
-        **決策：** 🟢 可買、🟡 觀察、🔴 不買。
-
-        **風險：** 🟢 低風險、🟡 中風險、🔴 高風險。
-
-        所以看到紅色時，要先看它是「價格上漲」還是「高風險」；兩者的意義不同。
-        """)
-
-    with st.expander("⚠️ 第五步：看到『可買』是不是就一定要買？"):
-        st.markdown("""
-        **不是。**「可買」代表模型認為條件同時成立的程度較高，不代表未來一定上漲。
-
-        實戰建議依序確認：
-        **買進分 → 風險 → 資料品質 → 是否過熱 → 盤中動能 → 最後才由你決定是否下單。**
-
-        這套系統目前定位是**量化研究與交易決策輔助**，不是自動下單機器人。
-        """)
-
-    with st.expander("🔑 FinMind Token 是做什麼？怎麼省？"):
-        st.markdown("""
-        FinMind 主要負責盤後研究資料，例如日 K、營收、財報、PER/PBR、法人資料。
-
-        V10 已經把盤後完整研究改成**批次抓取**：候選股票的完整資料一次分批取得，再逐檔計算分數，避免以前每一檔股票重複打 5 個 API。
-
-        **建議：**有 Token 就放在「⚙️ 系統設定」；盤中掃描則盡量不消耗 FinMind。
-        """)
-
-    with st.expander("📊 最後：這個系統每天真正要看的只有什麼？"):
-        st.markdown("""
-        如果你不想看一堆數字，只看這 6 個：
-
-        **① 買進分　② 狀態　③ 風險　④ 資料品質　⑤ 近 1／5／20 日漲跌　⑥ 盤中動能**
-
-        其他指標都是「需要深入研究時再打開」。
-        """)
 
 # --- TAB：系統設定（程式碼故意寫在最前面執行，讓改設定當下就對其他分頁生效，
 #     即使它在畫面上排在最後一個分頁也一樣）---
@@ -3295,28 +3354,7 @@ with tab_settings:
     render_settings_tab()
 
     st.divider()
-    with st.expander("📖 系統說明"):
-        st.markdown("""
-        **V10.0 最終版重點：**
-        * **買進分是唯一的主分數。** 綜合分、起漲分等內部因子仍在計算，但只出現在「股票分析」的詳細分析裡，不會同時丟兩個分數給你。
-        * **雙掃描器。** 盤中即時與盤後深度共用同一套核心研究引擎，但資料層分開；盤中優先 0 FinMind，盤後才做完整深度分析。
-        * **全市場掃描是真的全市場。** 不再是股票代碼排序後直接切前 N 檔；優先用交易所官方 OpenAPI 的「今日全市場成交金額」快照（免費、不吃 FinMind 額度）排出最活躍的候選名單，抓不到快照時才退回全市場均勻隨機取樣。
-        * **FinMind 額度更省。** 初篩後的完整研究改成批次抓取 5 個 dataset，不再每檔股票重打 5 次；日K／營收／財報／PER/PBR／法人買賣也保留快取。
-        * **盤後更穩。** 多檔分析不再共用同一個 DataLoader；每個 worker 使用獨立 client，降低「18/18 分析完成但全部沒有有效資料」的情況。
-        * **一週實測驗證的是買進分本身**，用一模一樣的公式與門檻回推歷史訊號，不是另一套簡化規則。
-        * **狀態標籤**（🟢低位起漲／🟢趨勢發動／🟡強勢追蹤／🟠短線過熱／🔴趨勢轉弱）取代單純的「過熱：是/否」，強勢和過熱不是同一件事。
-        * **風險分獨立於買進分。** 買進分回答「條件強不強」，風險分回答「看錯了代價多大」。
-
-        **📌 前台只看這幾項：**
-        * 買進分 85–100：🟢 可買 ／ 65–84：🟡 觀察 ／ <65：🔴 不買
-        * 漲停附近：⚠️ 漲停勿追
-
-        買進分是內部多因子加權後的「目前條件強度」，不是未來上漲機率，也不是獲利保證。真正要驗證「能不能持續漲」，要看歷史驗證與之後的實際結果。
-
-        **尚未做到、留給下一版的事：** 把買進分做成真正的「歷史勝率校準」（例如「買進分 85–89 的標的過去 5 日勝率 68%」）
-        需要每天把當天的買進分記錄下來、持續累積很多天才能算出可信的統計，這需要跨 session 的資料儲存（例如資料庫或每日存檔），
-        不是單一次 Streamlit session 能做到的，先誠實列在這裡，之後再做。
-        """)
+    st.caption("📖 完整使用說明（含版本重點）已整合成單一頁面，統一放在「📖 使用說明」分頁，這裡不重複列出。")
 
 # 系統設定分頁的元件已經先跑過一次，這裡讀到的一定是「這次互動」的最新值，
 # 其他分頁（歷史驗證）才不會有改了設定卻要多按一次才生效的延遲問題。
