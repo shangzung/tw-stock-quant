@@ -1028,27 +1028,23 @@ def clamp(x, lo=0, hi=100):
 
 
 # =========================
-# V11.0 策略模式：保守 / 平衡 / 積極
-# 三種模式只調整「門檻」與「風控倍數」，不改變底層評分邏輯本身，
+# V11.1 策略模式：平衡 / 積極（拿掉保守，只留這兩檔）
+# 兩種模式只調整「門檻」與「風控倍數」，不改變底層評分邏輯本身，
 # 讓同一套引擎可以用不同的敏感度掃描 / 回測 / 比較。
+# reaction_threshold：V11.1 新增，給「當日反應分」（跳空＋爆量＋收盤位置）用的獨立門檻，
+# 跟 radar_threshold（給即時雷達五子分數用）分開，兩組分數量級不同不能共用同一個門檻。
 # =========================
 STRATEGY_MODES = {
-    "保守": {
-        "eod_buy_threshold": 88, "eod_watch_threshold": 78, "overheat_penalty": 25,
-        "bear_mult": 0.40, "hold_days": 15, "stop_atr": 1.5, "target_atr": 2.5,
-        "radar_threshold": 78, "radar_watch": 65,
-        "desc": "門檻最高，訊號最少但相對嚴謹，寧可晚進場也不追熱。",
-    },
     "平衡": {
         "eod_buy_threshold": 85, "eod_watch_threshold": 65, "overheat_penalty": 20,
         "bear_mult": 0.55, "hold_days": 10, "stop_atr": 2.0, "target_atr": 3.0,
-        "radar_threshold": 68, "radar_watch": 55,
+        "radar_threshold": 68, "radar_watch": 55, "reaction_threshold": 62,
         "desc": "維持 V10 原始門檻，訊號數量與品質取平衡（預設模式）。",
     },
     "積極": {
         "eod_buy_threshold": 78, "eod_watch_threshold": 55, "overheat_penalty": 10,
         "bear_mult": 0.70, "hold_days": 7, "stop_atr": 2.5, "target_atr": 4.0,
-        "radar_threshold": 55, "radar_watch": 42,
+        "radar_threshold": 55, "radar_watch": 42, "reaction_threshold": 45,
         "desc": "門檻最低、進場最早，訊號最多，也最容易誤觸假訊號。",
     },
 }
@@ -1062,7 +1058,7 @@ def get_mode_params(mode):
 def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
     分數代表條件整體強弱，不是保證未來報酬率。
-    mode：保守/平衡/積極，只調整買進與觀察的分數門檻，不改變分數本身。
+    mode：平衡/積極，只調整買進與觀察的分數門檻，不改變分數本身。
     """
     mp = get_mode_params(mode)
     if limit_up:
@@ -1552,6 +1548,36 @@ def intraday_radar_score(row):
     return clamp(vb * .25 + mo * .20 + vw * .15 + hb * .25 + mf * .15)
 
 
+def same_day_reaction_score(row, prev_close, avg_vol20):
+    """V11.1 新增：用單一交易日自己的 OHLCV 算『當日反應強度』，
+    取代『盤中』回測原本借用的起漲分（breakout_score，多日趨勢確認分）。
+    三個子指標都是「當天收盤後就能算出來」的即時反應，不需要等 MA/ADX 這種要花好幾天才會成立的趨勢條件：
+      - 跳空幅度：今天開盤相對昨收，資金是不是一開盤就搶進。
+      - 爆量倍數：今天成交量相對近20日均量，是不是明顯放量。
+      - 收盤位置：收在當天高低區間的哪裡，收越高代表買盤越強勢、不是曇花一現。
+    """
+    o, h, l, c, v = [safe_float(row.get(k)) for k in ("open", "max", "min", "close", "volume")]
+    if pd.isna(prev_close) or prev_close <= 0 or pd.isna(o):
+        return 0.0
+
+    gap_pct = (o / prev_close - 1) * 100
+    vol_mult = v / avg_vol20 if (not pd.isna(avg_vol20) and avg_vol20 > 0) else 1.0
+    rng = h - l if (not pd.isna(h) and not pd.isna(l)) else 0
+    close_pos = (c - l) / rng if rng > 0 else 0.5
+
+    score = 0.0
+    if gap_pct >= 3: score += 30
+    elif gap_pct >= 1: score += 18
+    elif gap_pct > 0: score += 8
+
+    if vol_mult >= 3: score += 35
+    elif vol_mult >= 2: score += 25
+    elif vol_mult >= 1.5: score += 12
+
+    score += clamp(close_pos, 0, 1) * 35
+    return clamp(score)
+
+
 def intraday_radar_signal(radar_score, mode=DEFAULT_MODE):
     mp = get_mode_params(mode)
     if radar_score >= mp["radar_threshold"]:
@@ -1658,7 +1684,7 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
         if _c not in out.columns:
             out[_c] = _default
 
-    # ⚡ 盤中起漲雷達：五個子分數 + 綜合雷達分 + 保守/平衡/積極 訊號門檻
+    # ⚡ 盤中起漲雷達：五個子分數 + 綜合雷達分 + 平衡/積極 訊號門檻
     out["爆量突破分"] = out.apply(volume_breakout_score, axis=1)
     out["分時動能分"] = out.apply(intraday_momentum_score, axis=1)
     out["VWAP強弱"] = out.apply(vwap_strength_score, axis=1)
@@ -2175,7 +2201,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
     Point-in-time：每一類資料都先切到 as_of_date，再計算分數。
     財報採「財報日期 + 45 天」作為保守可得日代理；營收採 +15 天代理。
     真正精準的 release-date backtest 仍需資料源提供公告日欄位。
-    mode：保守/平衡/積極 — 只影響過熱懲罰、空頭市場折扣與決策門檻，分數計算方式不變，
+    mode：平衡/積極 — 只影響過熱懲罰、空頭市場折扣與決策門檻，分數計算方式不變，
     確保不同模式之間的分數仍可互相比較。
     """
     mp = get_mode_params(mode)
@@ -2516,12 +2542,16 @@ def trade_costs(notional, fee, tax=0, slippage=0, side="buy"):
 
 def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=None, start_date=None, end_date=None, mode=DEFAULT_MODE, scan_mode="盤後"):
     """單股 Point-in-Time 回測。
-    mode：保守/平衡/積極 — 決定進場門檻與停損停利倍數。
+    mode：平衡/積極 — 決定進場門檻與停損停利倍數。
     scan_mode：
-      - 盤後：用「當日收盤後」算出的買進分，隔一個交易日開盤才進場（V10 原始邏輯，較保守、有一天確認延遲）。
-      - 盤中：用「前一日收盤」算出的起漲分（breakout 子分數）先行判斷，當天開盤即進場，
-              模擬「盤中起漲雷達」提早一個交易日抓到起漲訊號的效果。兩者用同一套底層評分引擎，
-              差別只在「用哪一天的分數」與「哪一天進場」，方便公平比較。
+      - 盤後：用「當日收盤後」算出的買進分（基本面＋估值＋籌碼＋技術综合），隔一個交易日開盤才進場
+              （V10 原始邏輯，較嚴謹、有一天確認延遲）。
+      - 盤中：V11.1 起改用「前一日自己的 OHLCV」算出的當日反應分（跳空幅度＋爆量倍數＋收盤位置，
+              見 same_day_reaction_score），當天開盤即進場。這是單日就能成立的反應型訊號，
+              不再依賴 breakout_score 那種要 MA20>MA60、ADX≥25 才會觸發的多日趨勢確認分，
+              目的是讓「盤中」真的能抓到起漲當天或隔天的反應，而不是等趨勢確立後才進場。
+              兩種模式用同一套風控（停損停利／持有天數），差別只在「用什麼判斷進場」與「哪一天進場」，
+              方便公平比較。
     """
     mp = get_mode_params(mode)
     if hold_days is None: hold_days = mp["hold_days"]
@@ -2538,11 +2568,13 @@ def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=Non
         row=daily.iloc[i]; next_row=daily.iloc[i+1]; date=pd.Timestamp(row["date"])
         price=safe_float(row["close"])
         if shares==0:
-            if scan_mode=="盤中" and i>=1:
-                sig_date=pd.Timestamp(daily.iloc[i-1]["date"])
-                reg=market_regime(sig_date,mkt); snap=calculate_stock_snapshot(stock_id,sig_date,sources,reg,mode=mode)
-                triggered = snap is not None and safe_float(snap.get("起漲分")) >= mp["radar_threshold"] and "轉弱" not in str(snap.get("狀態",""))
-                entry_row, entry_idx, trig_reason = row, i, "盤中起漲雷達"
+            if scan_mode=="盤中" and i>=21:
+                sig_row = daily.iloc[i-1]
+                prev_close_sig = safe_float(daily.iloc[i-2]["close"])
+                avg_vol20 = safe_float(daily["volume"].iloc[i-21:i-1].mean())
+                reaction = same_day_reaction_score(sig_row, prev_close_sig, avg_vol20)
+                triggered = reaction >= mp["reaction_threshold"]
+                entry_row, entry_idx, trig_reason = row, i, "盤中當日反應"
                 atr = safe_float(daily.iloc[i-1].get("ATR"))
             else:
                 reg=market_regime(date,mkt); snap=calculate_stock_snapshot(stock_id,date,sources,reg,mode=mode)
@@ -2578,11 +2610,11 @@ def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=Non
     return metrics
 
 
-STRATEGY_COMBOS = [("盤中", "積極"), ("盤中", "平衡"), ("盤中", "保守"), ("盤後", "積極"), ("盤後", "平衡"), ("盤後", "保守")]
+STRATEGY_COMBOS = [("盤中", "積極"), ("盤中", "平衡"), ("盤後", "積極"), ("盤後", "平衡")]
 
 
 def strategy_compare_report(stock_id, initial_capital, fee, tax, slippage, start_date=None, end_date=None, combos=None):
-    """同一檔股票，用『盤中/盤後 × 保守/平衡/積極』六種組合各跑一次回測，
+    """同一檔股票，用『盤中/盤後 × 平衡/積極』四種組合各跑一次回測，
     回報每種組合在指定區間內第一筆進場的日期與該筆報酬（若還持有中，回報未實現報酬）。
     直接回答「哪一顆按鈕最會抓飆股」。
     """
@@ -3175,9 +3207,9 @@ with tab_intraday:
         </div>
         """, unsafe_allow_html=True)
 
-        intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["🛡 保守", "⚖ 平衡", "🚀 積極"], horizontal=True, index=1, key="intraday_mode_choice",
-                                         help="只調整「起漲訊號」的雷達分門檻：保守最嚴格、訊號最少；積極門檻最低、進場最早也最容易誤觸。")
-        intraday_mode = {"🛡 保守": "保守", "⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
+        intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["⚖ 平衡", "🚀 積極"], horizontal=True, index=0, key="intraday_mode_choice",
+                                         help="只調整「起漲訊號」的雷達分門檻：平衡門檻較高、訊號較少較嚴謹；積極門檻最低、進場最早也最容易誤觸。")
+        intraday_mode = {"⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
 
         if st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True):
             with st.spinner("連線交易所並掃描市場中…"):
@@ -3386,9 +3418,9 @@ with tab_eod:
         with c2:
             strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1)
         with c3:
-            eod_mode_choice = st.radio("🌙 盤後策略模式", ["🛡 保守", "⚖ 平衡", "🚀 積極"], horizontal=True, index=1,
-                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：保守門檻最高、訊號最少；積極門檻最低、訊號最多也最容易誤觸。")
-        eod_mode = {"🛡 保守": "保守", "⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(eod_mode_choice, DEFAULT_MODE)
+            eod_mode_choice = st.radio("🌙 盤後策略模式", ["⚖ 平衡", "🚀 積極"], horizontal=True, index=0,
+                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：平衡門檻較高、訊號較少較嚴謹；積極門檻最低、訊號最多也最容易誤觸。")
+        eod_mode = {"⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(eod_mode_choice, DEFAULT_MODE)
         st.session_state["eod_mode"] = eod_mode
 
         if market_choice == "🏛️ 僅上市": uni = universe_df[universe_df["type"].str.lower() == "twse"]
@@ -3947,9 +3979,9 @@ with tab_advanced:
         sc4, sc5 = st.columns(2)
         with sc4:
             single_scan_mode = st.radio("掃描模式", ["盤中", "盤後"], horizontal=True, key="single_bt_scanmode",
-                                         help="盤中：用前一日收盤算出的起漲分，當天開盤即進場，抓訊號較早。盤後：用當日收盤確認的買進分，隔一交易日開盤才進場，較保守。")
+                                         help="盤中：用前一日自己的跳空／爆量／收盤位置算出的當日反應分，當天開盤即進場，抓訊號較早。盤後：用當日收盤確認的買進分，隔一交易日開盤才進場，較嚴謹。")
         with sc5:
-            single_mode = st.radio("策略", ["保守", "平衡", "積極"], horizontal=True, index=1, key="single_bt_mode")
+            single_mode = st.radio("策略", ["平衡", "積極"], horizontal=True, index=0, key="single_bt_mode")
         if single_stock_input and st.button("▶️ 執行單股回測", type="primary"):
             with st.status(f"📉 {single_stock_input}（{single_scan_mode}・{single_mode}）Point-in-Time 回測中…", expanded=False):
                 st.session_state["single_backtest_res"] = backtest_single(
@@ -3980,7 +4012,7 @@ with tab_advanced:
 
     with sub_compare:
         st.subheader("📊 策略比較報表")
-        st.caption("同一檔股票，一次跑「盤中/盤後 × 保守/平衡/積極」六種組合，直接回答哪一顆按鈕最會抓飆股。")
+        st.caption("同一檔股票，一次跑「盤中/盤後 × 平衡/積極」四種組合，直接回答哪一顆按鈕最會抓飆股。")
         cc1, cc2, cc3 = st.columns([1.2, 1, 1])
         with cc1:
             cmp_stock = st.text_input("股票", value=(stocks[0] if stocks else "5351"), key="cmp_bt_stock").strip()
@@ -3989,7 +4021,7 @@ with tab_advanced:
         with cc3:
             cmp_end = st.date_input("結束日期", value=datetime.now().date(), key="cmp_bt_end")
         if cmp_stock and st.button("🚀 執行策略比較", type="primary"):
-            with st.status(f"📊 {cmp_stock} 六種策略組合比較中…", expanded=False):
+            with st.status(f"📊 {cmp_stock} 四種策略組合比較中…", expanded=False):
                 st.session_state["strategy_cmp_res"] = strategy_compare_report(
                     cmp_stock, initial_capital, fee, tax, slippage, start_date=cmp_start, end_date=cmp_end)
         cmp_res = st.session_state.get("strategy_cmp_res")
@@ -3999,7 +4031,7 @@ with tab_advanced:
             if not valid.empty:
                 best = valid.iloc[0]
                 st.success(f"🏆 這段區間裡，**{best['策略']}** 抓得最早／表現最好：{best['進場日']} 進場，報酬 {best['報酬(%)']:+.2f}%（{best['狀態']}）。")
-            st.caption("「盤中」模式用前一日收盤的起漲分、當天開盤即進場；「盤後」模式用當日收盤確認的買進分、隔一交易日才進場，兩者用同一套引擎，只差進場時機與門檻。")
+            st.caption("「盤中」模式用前一日自己的跳空／爆量／收盤位置算出當日反應分、當天開盤即進場；「盤後」模式用當日收盤確認的買進分、隔一交易日才進場，兩者用同一套風控，只差進場判斷與時機。")
 
     with sub_leaderboard:
         st.subheader("🏆 策略排行榜")
@@ -4014,7 +4046,7 @@ with tab_advanced:
             lb_stocks = clean_stock_list(lb_text)
         else:
             lb_sample_n = st.slider("全市場抽樣檔數", 10, 100, 30, 10, key="lb_sample_n",
-                                     help="全市場檔數太多，逐檔跑六種組合回測會消耗大量 FinMind 額度與時間，先用抽樣估計模式優劣。")
+                                     help="全市場檔數太多，逐檔跑四種組合回測會消耗大量 FinMind 額度與時間，先用抽樣估計模式優劣。")
             uni_lb = get_stock_universe()
             lb_stocks = uni_lb["stock_id"].sample(n=min(lb_sample_n, len(uni_lb)), random_state=int(datetime.now().strftime("%Y%m%d"))).tolist() if not uni_lb.empty else []
         lc1, lc2 = st.columns(2)
