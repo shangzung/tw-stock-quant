@@ -3966,6 +3966,62 @@ with tab_advanced:
         if res is not None and not res.empty:
             st.dataframe(style_pnl(res),use_container_width=True,hide_index=True); c1,c2=st.columns(2); c1.metric("平均獲利",f"{res['獲利(%)'].mean():.2f}%"); c2.metric("勝率",f"{(res['獲利(%)']>0).mean()*100:.1f}%")
 
+    def render_plain_backtest_summary(result, stock_id):
+        """給股市新手看的白話摘要：只講『什麼時候買、賺賠幾%、現在狀態』，
+        其餘技術指標（Sharpe/Beta/MACD…）都收進下面的進階區塊，不在這裡出現。"""
+        trades = result.get("trades_detail") or []
+        op = result.get("open_position")
+        st.markdown(f"#### 📖 白話結果：{stock_id} 這段期間發生了什麼事")
+
+        if not trades and not op:
+            st.warning("這段期間系統**沒有找到符合條件的買點**，代表訊號一直沒有出現，這段期間等於沒有進場、也沒有虧錢。")
+            return
+
+        def _card(label_top, date_text, price_text, status_text, pct, pct_label, note=""):
+            color = "#2ecc71" if pct >= 0 else "#e74c3c"
+            sign_icon = "🟢" if pct >= 0 else "🔴"
+            st.markdown(f"""
+<div style="background:#151515;border-radius:14px;padding:22px 26px;border:1px solid #333;">
+  <div style="display:flex;gap:48px;flex-wrap:wrap;">
+    <div>
+      <div style="font-size:14px;color:#999;">📅 {label_top}</div>
+      <div style="font-size:24px;font-weight:700;color:#fff;">{date_text}</div>
+      <div style="font-size:14px;color:#999;margin-top:4px;">買進價格 {price_text} 元</div>
+    </div>
+    <div>
+      <div style="font-size:14px;color:#999;">📊 目前狀態</div>
+      <div style="font-size:20px;font-weight:600;color:#fff;">{status_text}</div>
+    </div>
+    <div>
+      <div style="font-size:14px;color:#999;">{sign_icon} {pct_label}</div>
+      <div style="font-size:32px;font-weight:800;color:{color};">{pct:+.1f}%</div>
+    </div>
+  </div>
+  {f'<div style="font-size:13px;color:#888;margin-top:14px;">{note}</div>' if note else ''}
+</div>
+""", unsafe_allow_html=True)
+
+        if op:
+            entry_date = pd.Timestamp(op["entry_date"]).strftime("%Y-%m-%d")
+            _card("進場日期", entry_date, f"{op['entry_price']:.2f}", "🟡 還在持有中，還沒賣出",
+                  op["unrealized_pct"], "目前浮動損益（還沒真的入袋，會隨股價變動）",
+                  note="這是系統目前還沒平倉的部位，最終賺賠要等實際賣出那天才算數。")
+        elif trades:
+            last = trades[-1]
+            entry_date = pd.Timestamp(last["entry_date"]).strftime("%Y-%m-%d")
+            exit_date = pd.Timestamp(last["exit_date"]).strftime("%Y-%m-%d")
+            pnl_pct = (last["exit"] / last["entry"] - 1) * 100
+            reason_map = {"TARGET": "🎯 漲到目標價，系統自動獲利了結", "STOP": "🛑 跌破停損防線，系統自動出場",
+                          "TIME": "⏰ 持有天數到了，系統自動出場"}
+            _card("進場日期", entry_date, f"{last['entry']:.2f}",
+                  f"✅ 已賣出（{exit_date}）", pnl_pct, "這筆操作的最終獲利",
+                  note=reason_map.get(last["reason"], str(last["reason"])))
+
+        n = len(trades)
+        if n:
+            wins = sum(1 for t in trades if t["exit"] > t["entry"])
+            st.caption(f"📌 這段期間系統總共進出場 {n} 次：賺錢 {wins} 次、賠錢 {n-wins} 次。上面顯示的是最近一次。完整每一筆紀錄在下面「進階數據」裡可以看。")
+
     with sub_single:
         st.subheader("📉 單股研究級回測")
         st.caption("輸入股票代碼＋起訖日期＋想測試的掃描模式與策略，直接看該組合在這段區間會不會抓到訊號、什麼時候進場。")
@@ -3989,26 +4045,24 @@ with tab_advanced:
                     start_date=single_start, end_date=single_end, mode=single_mode, scan_mode=single_scan_mode)
         result=st.session_state.get("single_backtest_res")
         if result:
-            metric_grid(result); ai_explain(result)
-            bc=st.columns(4)
-            bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A")
-            bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
-            bc[2].metric("Beta / TWII", f"{result.get('beta_TWII',np.nan):.2f}" if not pd.isna(result.get('beta_TWII',np.nan)) else "N/A")
-            bc[3].metric("持有天數", f"{result.get('hold_days','—')} 天")
-            fig=build_backtest_technical_figure(result)
-            st.plotly_chart(fig,use_container_width=True)
-            op = result.get("open_position")
-            if op:
-                st.info(f"📌 目前仍持有中：{pd.Timestamp(op['entry_date']).strftime('%Y-%m-%d')} 進場（{op.get('trigger','')}），未實現報酬 {op['unrealized_pct']:+.2f}%。")
-            with st.expander("📋 交易明細", expanded=True):
-                td = pd.DataFrame(result.get("trades_detail", []))
-                if not td.empty:
-                    td["entry_date"] = pd.to_datetime(td["entry_date"]).dt.strftime("%Y-%m-%d")
-                    td["exit_date"] = pd.to_datetime(td["exit_date"]).dt.strftime("%Y-%m-%d")
-                    td["報酬(%)"] = ((td["exit"]/td["entry"]-1)*100).round(2)
-                st.dataframe(td, use_container_width=True, hide_index=True)
-            with st.expander("🧠 AI 研究摘要"):
-                st.write("這個策略不是單看技術訊號，而是用目前系統的買進分／起漲分與市場位階做歷史判斷；每個歷史日只使用當日以前的資料。")
+            render_plain_backtest_summary(result, single_stock_input)
+            with st.expander("🔬 進階數據（給有經驗的投資人看，一般不用點開）", expanded=False):
+                metric_grid(result); ai_explain(result)
+                bc=st.columns(4)
+                bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A")
+                bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
+                bc[2].metric("Beta / TWII", f"{result.get('beta_TWII',np.nan):.2f}" if not pd.isna(result.get('beta_TWII',np.nan)) else "N/A")
+                bc[3].metric("持有天數", f"{result.get('hold_days','—')} 天")
+                fig=build_backtest_technical_figure(result)
+                st.plotly_chart(fig,use_container_width=True)
+                with st.expander("📋 交易明細", expanded=True):
+                    td = pd.DataFrame(result.get("trades_detail", []))
+                    if not td.empty:
+                        td["entry_date"] = pd.to_datetime(td["entry_date"]).dt.strftime("%Y-%m-%d")
+                        td["exit_date"] = pd.to_datetime(td["exit_date"]).dt.strftime("%Y-%m-%d")
+                        td["報酬(%)"] = ((td["exit"]/td["entry"]-1)*100).round(2)
+                    st.dataframe(td, use_container_width=True, hide_index=True)
+                st.write("🧠 這個策略不是單看技術訊號，而是用目前系統的買進分／當日反應分與市場位階做歷史判斷；每個歷史日只使用當日以前的資料。")
 
     with sub_compare:
         st.subheader("📊 策略比較報表")
