@@ -3970,7 +3970,9 @@ with tab_advanced:
 
     def render_plain_backtest_summary(result, stock_id):
         """給股市新手看的白話摘要：只講『什麼時候買、賺賠幾%、現在狀態』，
-        其餘技術指標（Sharpe/Beta/MACD…）都收進下面的進階區塊，不在這裡出現。"""
+        其餘技術指標（Sharpe/Beta/MACD…）都收進下面的進階區塊，不在這裡出現。
+        當這段期間只有一筆進出場時，只顯示一張卡片（最簡單）；
+        當有多筆時，才拆成『最早一次』跟『目前現況』兩張卡片並排，兩張都清楚標名字，不會混在一起看不懂。"""
         trades = result.get("trades_detail") or []
         op = result.get("open_position")
         st.markdown(f"#### 📖 白話結果：{stock_id} 這段期間發生了什麼事")
@@ -3979,53 +3981,66 @@ with tab_advanced:
             st.warning("這段期間系統**沒有找到符合條件的買點**，代表訊號一直沒有出現，這段期間等於沒有進場、也沒有虧錢。")
             return
 
-        def _card(label_top, date_text, price_text, status_text, pct, pct_label, note=""):
+        def _card(header, date_text, price_text, status_text, pct, pct_label, note=""):
             color = "#2ecc71" if pct >= 0 else "#e74c3c"
             sign_icon = "🟢" if pct >= 0 else "🔴"
             st.markdown(f"""
-<div style="background:#151515;border-radius:14px;padding:22px 26px;border:1px solid #333;">
-  <div style="display:flex;gap:48px;flex-wrap:wrap;">
+<div style="background:#151515;border-radius:14px;padding:20px 24px;border:1px solid #333;height:100%;">
+  <div style="font-size:14px;color:#ccc;font-weight:600;margin-bottom:10px;">{header}</div>
+  <div style="display:flex;gap:32px;flex-wrap:wrap;">
     <div>
-      <div style="font-size:14px;color:#999;">📅 {label_top}</div>
-      <div style="font-size:24px;font-weight:700;color:#fff;">{date_text}</div>
-      <div style="font-size:14px;color:#999;margin-top:4px;">買進價格 {price_text} 元</div>
+      <div style="font-size:13px;color:#999;">📅 進場日期</div>
+      <div style="font-size:22px;font-weight:700;color:#fff;">{date_text}</div>
+      <div style="font-size:13px;color:#999;margin-top:4px;">買進價格 {price_text} 元</div>
     </div>
     <div>
-      <div style="font-size:14px;color:#999;">📊 目前狀態</div>
-      <div style="font-size:20px;font-weight:600;color:#fff;">{status_text}</div>
+      <div style="font-size:13px;color:#999;">📊 狀態</div>
+      <div style="font-size:18px;font-weight:600;color:#fff;">{status_text}</div>
     </div>
     <div>
-      <div style="font-size:14px;color:#999;">{sign_icon} {pct_label}</div>
-      <div style="font-size:32px;font-weight:800;color:{color};">{pct:+.1f}%</div>
+      <div style="font-size:13px;color:#999;">{sign_icon} {pct_label}</div>
+      <div style="font-size:28px;font-weight:800;color:{color};">{pct:+.1f}%</div>
     </div>
   </div>
-  {f'<div style="font-size:13px;color:#888;margin-top:14px;">{note}</div>' if note else ''}
+  {f'<div style="font-size:12px;color:#888;margin-top:12px;">{note}</div>' if note else ''}
 </div>
 """, unsafe_allow_html=True)
 
-        if op:
-            entry_date = pd.Timestamp(op["entry_date"]).strftime("%Y-%m-%d")
-            _card("進場日期", entry_date, f"{op['entry_price']:.2f}", "🟡 還在持有中，還沒賣出",
-                  op["unrealized_pct"], "目前浮動損益（還沒真的入袋，會隨股價變動）",
-                  note="這是系統目前還沒平倉的部位，最終賺賠要等實際賣出那天才算數。")
-        elif trades:
-            last = trades[-1]
-            entry_date = pd.Timestamp(last["entry_date"]).strftime("%Y-%m-%d")
-            exit_date = pd.Timestamp(last["exit_date"]).strftime("%Y-%m-%d")
-            pnl_pct = (last["exit"] / last["entry"] - 1) * 100
+        def _event_from_trade(t):
+            entry_date = pd.Timestamp(t["entry_date"]).strftime("%Y-%m-%d")
+            exit_date = pd.Timestamp(t["exit_date"]).strftime("%Y-%m-%d")
+            pnl_pct = (t["exit"] / t["entry"] - 1) * 100
             reason_map = {"TARGET": "🎯 漲到目標價，系統自動獲利了結", "STOP": "🛑 跌破停損防線，系統自動出場",
                           "TIME": "⏰ 持有天數到了，系統自動出場"}
-            _card("進場日期", entry_date, f"{last['entry']:.2f}",
-                  f"✅ 已賣出（{exit_date}）", pnl_pct, "這筆操作的最終獲利",
-                  note=reason_map.get(last["reason"], str(last["reason"])))
+            return dict(date=entry_date, price=f"{t['entry']:.2f}", status=f"✅ 已賣出（{exit_date}）",
+                        pct=pnl_pct, pct_label="這筆操作的最終獲利", note=reason_map.get(t["reason"], str(t["reason"])))
+
+        def _event_from_open(o):
+            entry_date = pd.Timestamp(o["entry_date"]).strftime("%Y-%m-%d")
+            return dict(date=entry_date, price=f"{o['entry_price']:.2f}", status="🟡 還在持有中，還沒賣出",
+                        pct=o["unrealized_pct"], pct_label="目前浮動損益（還沒真的入袋，會隨股價變動）",
+                        note="這是系統目前還沒平倉的部位，最終賺賠要等實際賣出那天才算數。")
+
+        first_event = _event_from_trade(trades[0]) if trades else _event_from_open(op)
+        latest_event = _event_from_open(op) if op else (_event_from_trade(trades[-1]) if trades else None)
+        only_one_event = (latest_event is None) or (latest_event["date"] == first_event["date"] and len(trades) <= 1)
+
+        if only_one_event:
+            e = first_event
+            _card("📌 進場結果", e["date"], e["price"], e["status"], e["pct"], e["pct_label"], e["note"])
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                e = first_event
+                _card("🕐 這段期間最早一次進場（測試引擎抓訊號快不快，看這張）", e["date"], e["price"], e["status"], e["pct"], e["pct_label"], e["note"])
+            with col2:
+                e = latest_event
+                _card("📌 你現在的狀況（如果現在才要決定怎麼做，看這張）", e["date"], e["price"], e["status"], e["pct"], e["pct_label"], e["note"])
 
         n = len(trades)
         if n:
             wins = sum(1 for t in trades if t["exit"] > t["entry"])
-            first = trades[0]
-            first_entry = pd.Timestamp(first["entry_date"]).strftime("%Y-%m-%d")
-            st.markdown(f"🔎 **這段期間第一次進場：{first_entry}**（訊號：{first.get('entry_trigger','—')}）— 想知道引擎抓訊號快不快，看這個日期比上面卡片準。")
-            st.caption(f"📌 這段期間系統總共進出場 {n} 次：賺錢 {wins} 次、賠錢 {n-wins} 次。上面卡片顯示的是最近一次（目前仍持有中則優先顯示）。完整每一筆紀錄在下面「進階數據」裡可以看。")
+            st.caption(f"📌 這段期間系統總共進出場 {n} 次：賺錢 {wins} 次、賠錢 {n-wins} 次。完整每一筆紀錄在下面「進階數據」裡可以看。")
 
     with sub_single:
         st.subheader("📉 單股研究級回測")
