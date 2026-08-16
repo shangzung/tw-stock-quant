@@ -218,37 +218,86 @@ def clear_saved_token():
         return False
 
 
-def load_saved_scan():
-    """開啟 App 時，把上次留下來的掃描結果讀回來，直到下一次執行盤後深度掃描才會被覆蓋掉。"""
+def load_saved_scan_all():
+    """讀出本機『每個模式（穩健／積極）各自』的盤後深度掃描結果，回傳 {mode: payload} 字典，
+    這樣兩個模式的結果可以同時保留，不會互相洗掉。"""
     try:
         if SCAN_CACHE_FILE.exists():
-            return pd.read_pickle(SCAN_CACHE_FILE)
+            data = pd.read_pickle(SCAN_CACHE_FILE)
+            if isinstance(data, dict):
+                if "out" in data:
+                    # 相容舊版快取檔（改版前沒有分模式儲存），一律當成「平衡」模式的結果。
+                    return {"平衡": data}
+                return data
     except Exception:
         pass
-    return None
+    return {}
 
 
-def save_scan_to_disk(payload: dict):
+def load_saved_scan(mode=None):
+    """開啟 App 時，把上次留下來的掃描結果讀回來，直到下一次用同一個模式執行盤後深度掃描才會被覆蓋掉。
+    不指定 mode 時，回傳『所有模式中最新一次』的結果（給盤中掃描當研究基準用）。"""
+    all_scans = load_saved_scan_all()
+    if not all_scans:
+        return None
+    if mode is not None:
+        return all_scans.get(mode)
     try:
-        pd.to_pickle(payload, SCAN_CACHE_FILE)
+        return max(all_scans.values(), key=lambda p: p.get("saved_at", ""))
+    except Exception:
+        return next(iter(all_scans.values()), None)
+
+
+def save_scan_to_disk(mode, payload: dict):
+    """存檔時保留『其他模式』的舊結果，只覆蓋這次掃描用的那個模式，
+    穩健／積極模式的結果因此可以同時保留、各自查看。"""
+    try:
+        all_scans = load_saved_scan_all()
+        all_scans[mode] = payload
+        pd.to_pickle(all_scans, SCAN_CACHE_FILE)
         return True
     except Exception:
         return False
 
 
-def clear_saved_scan():
+def clear_saved_scan(mode=None):
+    """mode=None 清除全部模式的快取；指定 mode 時只清除那一個模式。"""
     try:
-        if SCAN_CACHE_FILE.exists():
-            SCAN_CACHE_FILE.unlink()
+        if mode is None:
+            if SCAN_CACHE_FILE.exists():
+                SCAN_CACHE_FILE.unlink()
+        else:
+            all_scans = load_saved_scan_all()
+            all_scans.pop(mode, None)
+            pd.to_pickle(all_scans, SCAN_CACHE_FILE)
         return True
     except Exception:
         return False
+
+
+def load_hot_stock_scan_all():
+    """讀出本機『每個模式』各自的找飆股候選快取，回傳 {mode: payload} 字典。"""
+    try:
+        if HOT_STOCK_CACHE_FILE.exists():
+            data = pd.read_pickle(HOT_STOCK_CACHE_FILE)
+            if isinstance(data, dict):
+                if "out" in data:
+                    _m = data.get("mode") or "平衡"
+                    return {_m: data}
+                return data
+    except Exception:
+        pass
+    return {}
 
 
 def save_hot_stock_scan(df, mode=None):
-    """找飆股候選存檔：盤後掃描算好後存一次，App 重開也不會消失，隔天盤中直接讀。"""
+    """找飆股候選存檔：依模式（穩健／積極）分開保留，盤後掃描算好後存一次，
+    App 重開也不會消失，隔天盤中直接讀；兩個模式互不覆蓋。"""
     try:
-        pd.to_pickle({"out": df, "mode": mode, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, HOT_STOCK_CACHE_FILE)
+        _mode = mode or "平衡"
+        all_hot = load_hot_stock_scan_all()
+        all_hot[_mode] = {"out": df, "mode": _mode, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        pd.to_pickle(all_hot, HOT_STOCK_CACHE_FILE)
         return True
     except Exception:
         return False
@@ -265,16 +314,22 @@ def _migrate_legacy_hot_signal_labels(df):
     return df
 
 
-def load_hot_stock_scan():
-    try:
-        if HOT_STOCK_CACHE_FILE.exists():
-            payload = pd.read_pickle(HOT_STOCK_CACHE_FILE)
-            if isinstance(payload, dict) and isinstance(payload.get("out"), pd.DataFrame):
-                payload["out"] = _migrate_legacy_hot_signal_labels(payload["out"])
-            return payload
-    except Exception:
-        pass
-    return None
+def load_hot_stock_scan(mode=None):
+    """不指定 mode 時，回傳『所有模式中最新一次』的找飆股候選結果。"""
+    all_hot = load_hot_stock_scan_all()
+    if not all_hot:
+        return None
+    if mode is not None:
+        payload = all_hot.get(mode)
+    else:
+        try:
+            payload = max(all_hot.values(), key=lambda p: p.get("saved_at", ""))
+        except Exception:
+            payload = next(iter(all_hot.values()), None)
+    if isinstance(payload, dict) and isinstance(payload.get("out"), pd.DataFrame):
+        payload = dict(payload)
+        payload["out"] = _migrate_legacy_hot_signal_labels(payload["out"])
+    return payload
 
 
 def _coerce_holdings_dtypes(df):
@@ -354,26 +409,24 @@ st.set_page_config(
 )
 
 # 初始化所有分頁的 Session State，確保切換頁籤不會遺失資料
-if "market_scan_out" not in st.session_state: st.session_state["market_scan_out"] = None
-if "market_scan_candidates" not in st.session_state: st.session_state["market_scan_candidates"] = None
-if "market_scan_top5" not in st.session_state: st.session_state["market_scan_top5"] = None
-if "market_scan_saved_at" not in st.session_state: st.session_state["market_scan_saved_at"] = None
-if st.session_state["market_scan_out"] is None:
-    # App 重開後，先把上次留下的掃描結果讀回來，直到下一次執行盤後深度掃描才會被洗掉。
-    _saved_scan = load_saved_scan()
-    if _saved_scan:
-        st.session_state["market_scan_out"] = _saved_scan.get("out")
-        st.session_state["market_scan_candidates"] = _saved_scan.get("candidates")
-        st.session_state["market_scan_top5"] = _saved_scan.get("top5")
-        st.session_state["market_scan_saved_at"] = _saved_scan.get("saved_at")
-if "hot_stock_out" not in st.session_state: st.session_state["hot_stock_out"] = None
-if "hot_stock_saved_at" not in st.session_state: st.session_state["hot_stock_saved_at"] = None
-if st.session_state["hot_stock_out"] is None:
-    # 找飆股候選同樣重開 App 也不會消失，直到下一次盤後深度掃描才會被覆蓋。
-    _saved_hot = load_hot_stock_scan()
-    if isinstance(_saved_hot, dict):
-        st.session_state["hot_stock_out"] = _saved_hot.get("out")
-        st.session_state["hot_stock_saved_at"] = _saved_hot.get("saved_at")
+# V11.3：盤後深度掃描結果改成「依模式分開存」（穩健／積極各自一份），
+# 用哪個模式查看就顯示哪個模式最後一次的結果，兩者互不覆蓋。
+if "market_scan_by_mode" not in st.session_state:
+    # App 重開後，先把本機留著的每個模式結果讀回來，直到用同一個模式再次執行掃描才會被洗掉。
+    st.session_state["market_scan_by_mode"] = load_saved_scan_all()
+if "hot_stock_by_mode" not in st.session_state:
+    # 找飆股候選同樣依模式分開保留，重開 App 也不會消失。
+    st.session_state["hot_stock_by_mode"] = load_hot_stock_scan_all()
+
+
+def get_market_scan_state(mode):
+    """讀出『指定模式』目前最新的盤後深度掃描結果（{"out","candidates","top5","saved_at"} 或 None）。"""
+    return (st.session_state.get("market_scan_by_mode") or {}).get(mode)
+
+
+def get_hot_stock_state(mode):
+    """讀出『指定模式』目前最新的找飆股候選結果（{"out","saved_at",...} 或 None）。"""
+    return (st.session_state.get("hot_stock_by_mode") or {}).get(mode)
 if "year_sim_res" not in st.session_state: st.session_state["year_sim_res"] = None
 if "week_sim_res" not in st.session_state: st.session_state["week_sim_res"] = None
 if "candidate_out" not in st.session_state: st.session_state["candidate_out"] = None
@@ -3124,12 +3177,15 @@ def render_settings_tab():
     with c3:
         if st.button("🧹 清除快取"):
             st.cache_data.clear()
-            st.session_state["market_scan_out"] = None
-            st.session_state["market_scan_candidates"] = None
-            st.session_state["market_scan_top5"] = None
-            st.session_state["market_scan_saved_at"] = None
+            st.session_state["market_scan_by_mode"] = {}
+            st.session_state["hot_stock_by_mode"] = {}
             clear_saved_scan()
-            st.success("快取已清除，下次抓取會拿最新資料")
+            try:
+                if HOT_STOCK_CACHE_FILE.exists():
+                    HOT_STOCK_CACHE_FILE.unlink()
+            except Exception:
+                pass
+            st.success("快取已清除（穩健／積極模式的結果都會清掉），下次抓取會拿最新資料")
     _kind, _msg = _token_status
     getattr(st, _kind)(_msg)
 
@@ -3705,9 +3761,22 @@ with tab_eod:
             strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1)
         with c3:
             eod_mode_choice = st.radio("🌙 盤後策略模式", ["⚖ 穩健", "🚀 積極模式"], horizontal=True, index=0,
-                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：穩健＝門檻較高、訊號較少較嚴謹；積極模式＝門檻最低、訊號最多，但也最容易誤觸。")
+                                        key="eod_mode_choice",
+                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：穩健＝門檻較高、訊號較少較嚴謹；積極模式＝門檻最低、訊號最多，但也最容易誤觸。"
+                                             "兩個模式的掃描結果會分開保留，這個選項同時也決定下面要顯示哪一個模式的結果。")
         eod_mode = {"⚖ 穩健": "平衡", "🚀 積極模式": "積極"}.get(eod_mode_choice, DEFAULT_MODE)
         st.session_state["eod_mode"] = eod_mode
+
+        # 穩健／積極兩個模式的結果各自獨立保留，這裡先讓使用者看到「兩邊各自最後掃描時間」，
+        # 不用真的切換過去才知道另一個模式有沒有資料、資料是不是舊的。
+        _mode_status_bits = []
+        for _m_label, _m_key in [("⚖ 穩健", "平衡"), ("🚀 積極模式", "積極")]:
+            _st = get_market_scan_state(_m_key)
+            _bit = f"{_m_label}：{_st['saved_at']}" if _st and _st.get("saved_at") else f"{_m_label}：尚無資料"
+            if _m_key == eod_mode:
+                _bit = f"**{_bit}（目前顯示）**"
+            _mode_status_bits.append(_bit)
+        st.caption("　｜　".join(_mode_status_bits))
 
         if market_choice == "🏛️ 僅上市": uni = universe_df[universe_df["type"].str.lower() == "twse"]
         elif market_choice == "🏬 僅上櫃": uni = universe_df[universe_df["type"].str.lower() == "tpex"]
@@ -3765,8 +3834,11 @@ with tab_eod:
                     try:
                         hot_out = run_hot_stock_scan(batch_sources, universe_df, mode=eod_mode)
                         save_hot_stock_scan(hot_out, mode=eod_mode)
-                        st.session_state["hot_stock_out"] = hot_out
-                        st.session_state["hot_stock_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # 依模式分開存進 session state，不會把另一個模式（穩健／積極）的結果洗掉。
+                        st.session_state["hot_stock_by_mode"] = dict(st.session_state.get("hot_stock_by_mode") or {})
+                        st.session_state["hot_stock_by_mode"][eod_mode] = {
+                            "out": hot_out, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
                     except Exception as exc:
                         _log_api_error("run_hot_stock_scan", "-", exc)
 
@@ -3793,39 +3865,37 @@ with tab_eod:
                         out.insert(1, "名稱", out["股票代碼"].map(name_map).fillna(""))
                         candidates = out[out["決策"].isin(["🟢 可買"])]
                         _saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        _payload = {"out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at}
 
-                        st.session_state["market_scan_out"] = out
-                        st.session_state["market_scan_candidates"] = candidates
-                        st.session_state["market_scan_top5"] = out.head(5)
-                        st.session_state["market_scan_saved_at"] = _saved_at
+                        # 依模式（穩健／積極）分開存進 session state，兩邊互不覆蓋——
+                        # 切換上面的「盤後策略模式」就能各自查看，不用重新掃描。
+                        st.session_state["market_scan_by_mode"] = dict(st.session_state.get("market_scan_by_mode") or {})
+                        st.session_state["market_scan_by_mode"][eod_mode] = _payload
                         # 存到本機檔案：就算關掉 App 或重開機，這份結果也會留著，
-                        # 直到你下一次按「執行盤後深度掃描」才會被覆蓋掉。
-                        save_scan_to_disk({
-                            "out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at
-                        })
-                        try:
-                            pd.to_pickle({"out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at}, EOD_SCAN_CACHE_FILE)
-                        except Exception:
-                            pass
+                        # 直到你下一次用同一個模式按「執行盤後深度掃描」才會被覆蓋掉。
+                        save_scan_to_disk(eod_mode, _payload)
                         append_research_snapshot(out, _saved_at, regime.get("regime"), regime.get("score"))
                     else:
                         st.error("完整分析階段沒有取得有效資料。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
                 else:
                     st.error("初篩沒有取得任何有效資料（可能全數被流動性門檻濾掉）。請至「⚙️ 系統設定」檢查 API 診斷紀錄。")
 
-        if st.session_state.get("market_scan_out") is not None:
-            out_df = st.session_state["market_scan_out"]
-            top5_df = st.session_state.get("market_scan_top5")
-            _saved_at = st.session_state.get("market_scan_saved_at")
+        _cur_scan = get_market_scan_state(eod_mode)
+        if _cur_scan is not None:
+            out_df = _cur_scan.get("out")
+            top5_df = _cur_scan.get("top5")
+            _saved_at = _cur_scan.get("saved_at")
             if _saved_at:
-                st.caption(f"🕓 目前顯示的是 {_saved_at} 的盤後深度掃描結果（重開 App 也不會消失，按「執行盤後深度掃描」才會更新）。")
+                st.caption(f"🕓 目前顯示的是【{eod_mode_choice}】{_saved_at} 的盤後深度掃描結果（重開 App 也不會消失；"
+                           f"按「執行盤後深度掃描」只會更新目前選到的這個模式，另一個模式的結果不會被洗掉）。")
 
             if top5_df is not None and not top5_df.empty:
                 st.subheader("🔥 明日最值得看")
                 for rank, (_, row) in enumerate(top5_df.iterrows(), start=1):
                     render_pick_card(row, rank)
 
-            hot_df = st.session_state.get("hot_stock_out")
+            _cur_hot = get_hot_stock_state(eod_mode)
+            hot_df = _cur_hot.get("out") if _cur_hot else None
             if isinstance(hot_df, pd.DataFrame) and not hot_df.empty:
                 hot_hits = hot_df[hot_df["找飆股訊號"] == "🔥 反應強訊號"].head(10)
                 with st.expander(f"🔥 反應強候選（明日開盤參考，共 {len(hot_hits)} 檔達標）", expanded=len(hot_hits) > 0):
@@ -3848,9 +3918,9 @@ with tab_eod:
             show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
             show_scan_dataframe(out_df[show_cols])
 
-            cands_df = st.session_state["market_scan_candidates"]
+            cands_df = _cur_scan.get("candidates")
             st.subheader("🟢 明日可優先研究")
-            if cands_df.empty:
+            if cands_df is None or cands_df.empty:
                 st.info("這次掃描沒有股票同時通過所有買進條件——今天先觀察就好。")
             else:
                 cols2 = ["名稱"] + MAIN_TABLE_COLS if "名稱" in cands_df.columns else MAIN_TABLE_COLS
