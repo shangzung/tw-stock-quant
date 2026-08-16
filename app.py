@@ -1027,19 +1027,53 @@ def clamp(x, lo=0, hi=100):
     return max(lo, min(hi, float(x)))
 
 
-def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN"):
+# =========================
+# V11.0 策略模式：保守 / 平衡 / 積極
+# 三種模式只調整「門檻」與「風控倍數」，不改變底層評分邏輯本身，
+# 讓同一套引擎可以用不同的敏感度掃描 / 回測 / 比較。
+# =========================
+STRATEGY_MODES = {
+    "保守": {
+        "eod_buy_threshold": 88, "eod_watch_threshold": 78, "overheat_penalty": 25,
+        "bear_mult": 0.40, "hold_days": 15, "stop_atr": 1.5, "target_atr": 2.5,
+        "radar_threshold": 78, "radar_watch": 65,
+        "desc": "門檻最高，訊號最少但相對嚴謹，寧可晚進場也不追熱。",
+    },
+    "平衡": {
+        "eod_buy_threshold": 85, "eod_watch_threshold": 65, "overheat_penalty": 20,
+        "bear_mult": 0.55, "hold_days": 10, "stop_atr": 2.0, "target_atr": 3.0,
+        "radar_threshold": 68, "radar_watch": 55,
+        "desc": "維持 V10 原始門檻，訊號數量與品質取平衡（預設模式）。",
+    },
+    "積極": {
+        "eod_buy_threshold": 78, "eod_watch_threshold": 55, "overheat_penalty": 10,
+        "bear_mult": 0.70, "hold_days": 7, "stop_atr": 2.5, "target_atr": 4.0,
+        "radar_threshold": 55, "radar_watch": 42,
+        "desc": "門檻最低、進場最早，訊號最多，也最容易誤觸假訊號。",
+    },
+}
+DEFAULT_MODE = "平衡"
+
+
+def get_mode_params(mode):
+    return STRATEGY_MODES.get(mode, STRATEGY_MODES[DEFAULT_MODE])
+
+
+def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
     分數代表條件整體強弱，不是保證未來報酬率。
+    mode：保守/平衡/積極，只調整買進與觀察的分數門檻，不改變分數本身。
     """
+    mp = get_mode_params(mode)
     if limit_up:
         return "⚠️ 漲停勿追"
     if overheat:
         return "🟡 過熱觀察"
-    if market_regime == "BEAR" and score < 80:
+    if market_regime == "BEAR" and score < mp["eod_buy_threshold"] - 5:
         return "🔴 不買"
-    if score >= 85:
+    if score >= mp["eod_buy_threshold"]:
         return "🟢 可買"
-    if score >= 65:
+    if score >= mp["eod_watch_threshold"]:
         return "🟡 觀察"
     return "🔴 不買"
 
@@ -1446,6 +1480,87 @@ def get_intraday_market_snapshot():
         if c not in out: out[c] = np.nan
     return out
 
+# =========================
+# V11.0 ⚡ 盤中起漲雷達：五個盤中子分數
+# 交易所盤中快照只提供「即時價／漲跌／成交量／成交金額」單一時點快照，沒有分時明細、
+# 委買賣口與真正的日內 VWAP 序列，以下皆為在這個限制下設計的「合理代理指標」，
+# 不是交易所提供的真實委託單數據；量比／起漲分等需要K線的因子則沿用最近一次盤後計算結果。
+# =========================
+def volume_breakout_score(row):
+    """爆量突破分：用即時成交金額規模＋最近一次盤後量比，估計今天是不是明顯爆量。"""
+    turnover = safe_float(row.get("成交金額"), 0)
+    vol_ratio = safe_float(row.get("量比"), 1)
+    score = 0.0
+    if turnover >= 2_000_000_000: score += 55
+    elif turnover >= 1_000_000_000: score += 42
+    elif turnover >= 500_000_000: score += 30
+    elif turnover >= 100_000_000: score += 15
+    if vol_ratio >= 2.5: score += 45
+    elif vol_ratio >= 2.0: score += 35
+    elif vol_ratio >= 1.5: score += 22
+    elif vol_ratio >= 1.2: score += 10
+    return clamp(score)
+
+
+def intraday_momentum_score(row):
+    """分時動能分：即時漲跌%轉成 0-100，偏重是否已經翻紅走強，比基礎盤中動能分更敏感。"""
+    pct = safe_float(row.get("即時漲跌%"), 0)
+    score = 50 + pct * 9
+    return clamp(score)
+
+
+def vwap_strength_score(row):
+    """VWAP強弱：用成交金額/成交量還原今天的均價(近似VWAP)，看目前價格是溢價還是折價成交。"""
+    price = safe_float(row.get("即時價"), np.nan)
+    vol = safe_float(row.get("成交量"), 0)
+    turnover = safe_float(row.get("成交金額"), 0)
+    if pd.isna(price) or vol <= 0 or turnover <= 0:
+        return 50.0
+    vwap = turnover / vol
+    if vwap <= 0:
+        return 50.0
+    premium = (price / vwap - 1) * 100
+    return clamp(50 + premium * 12)
+
+
+def high20_breakout_score(row):
+    """突破20日高：沿用最近一次盤後計算的「近20日漲跌%」估計目前價格離波段高點的相對位置。"""
+    chg20 = safe_float(row.get("近20日漲跌%"), np.nan)
+    intraday_pct = safe_float(row.get("即時漲跌%"), 0)
+    if pd.isna(chg20):
+        return 50.0
+    return clamp(50 + (chg20 + intraday_pct) * 2.2)
+
+
+def main_force_buy_score(row):
+    """主力買盤強度（代理指標）：沒有真實三大法人/大戶委託單即時資料，
+    用「成交金額規模 × 是否同向上漲」推估主力介入強度，僅供參考，不是真實籌碼數據。"""
+    turnover = safe_float(row.get("成交金額"), 0)
+    pct = safe_float(row.get("即時漲跌%"), 0)
+    size_score = clamp(turnover / 20_000_000, 0, 60)
+    direction_bonus = 30 if pct > 0 else (0 if pct == 0 else -20)
+    return clamp(size_score + direction_bonus + 20)
+
+
+def intraday_radar_score(row):
+    """把五個盤中子分數整合成單一「起漲雷達分」，用於⚡盤中起漲雷達的排序與篩選。"""
+    vb = volume_breakout_score(row)
+    mo = intraday_momentum_score(row)
+    vw = vwap_strength_score(row)
+    hb = high20_breakout_score(row)
+    mf = main_force_buy_score(row)
+    return clamp(vb * .25 + mo * .20 + vw * .15 + hb * .25 + mf * .15)
+
+
+def intraday_radar_signal(radar_score, mode=DEFAULT_MODE):
+    mp = get_mode_params(mode)
+    if radar_score >= mp["radar_threshold"]:
+        return "🟢 起漲訊號"
+    if radar_score >= mp["radar_watch"]:
+        return "🟡 醞釀中"
+    return "⚪ 不明顯"
+
+
 def _intraday_score(row):
     pct = safe_float(row.get("即時漲跌%"), 0)
     turnover = safe_float(row.get("成交金額"), 0)
@@ -1514,7 +1629,7 @@ def _intraday_reason(row):
     return " · ".join(reasons[:3])
 
 
-def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N):
+def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
     snap = get_intraday_market_snapshot()
     if snap.empty: return pd.DataFrame()
     uni = universe_df[[c for c in ["stock_id", "stock_name", "type"] if c in universe_df.columns]].copy()
@@ -1530,7 +1645,7 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N):
     if isinstance(saved, dict) and isinstance(saved.get("out"), pd.DataFrame) and not saved["out"].empty:
         keep = [c for c in [
             "股票代碼", "買進分", "優先級", "風險", "狀態", "決策", "資料品質",
-            "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "趨勢", "說明", "理由"
+            "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "趨勢", "說明", "理由", "起漲分", "量比"
         ] if c in saved["out"].columns]
         base = saved["out"][keep].drop_duplicates("股票代碼")
         out = out.merge(base, on="股票代碼", how="left")
@@ -1539,9 +1654,19 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N):
         out["基準買進分"] = pd.to_numeric(out["買進分"], errors="coerce").fillna(50)
     else:
         out["基準買進分"] = 50.0
-    for _c, _default in [("風險", "🟡 中"), ("決策", ""), ("狀態", ""), ("資料品質", "")]:
+    for _c, _default in [("風險", "🟡 中"), ("決策", ""), ("狀態", ""), ("資料品質", ""), ("量比", 1.0), ("起漲分", np.nan)]:
         if _c not in out.columns:
             out[_c] = _default
+
+    # ⚡ 盤中起漲雷達：五個子分數 + 綜合雷達分 + 保守/平衡/積極 訊號門檻
+    out["爆量突破分"] = out.apply(volume_breakout_score, axis=1)
+    out["分時動能分"] = out.apply(intraday_momentum_score, axis=1)
+    out["VWAP強弱"] = out.apply(vwap_strength_score, axis=1)
+    out["突破20日高"] = out.apply(high20_breakout_score, axis=1)
+    out["主力買盤強度"] = out.apply(main_force_buy_score, axis=1)
+    out["起漲雷達分"] = out.apply(intraday_radar_score, axis=1).round(1)
+    out["雷達訊號"] = out["起漲雷達分"].apply(lambda s: intraday_radar_signal(s, mode=mode))
+
     out["即時調整分"] = (
         out["基準買進分"] * INTRADAY_BASE_WEIGHT
         + out["盤中動能分"] * INTRADAY_MOMENTUM_WEIGHT
@@ -2045,12 +2170,15 @@ def prepare_pit_sources(stock_id, daily_days=1500):
     }
 
 
-def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
+def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DEFAULT_MODE):
     """唯一的核心評分引擎：正常選股與所有歷史回測共用。
     Point-in-time：每一類資料都先切到 as_of_date，再計算分數。
     財報採「財報日期 + 45 天」作為保守可得日代理；營收採 +15 天代理。
     真正精準的 release-date backtest 仍需資料源提供公告日欄位。
+    mode：保守/平衡/積極 — 只影響過熱懲罰、空頭市場折扣與決策門檻，分數計算方式不變，
+    確保不同模式之間的分數仍可互相比較。
     """
+    mp = get_mode_params(mode)
     try:
         as_of = pd.Timestamp(as_of_date)
         daily_full = sources["daily"]
@@ -2073,12 +2201,12 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
         fund_pct = clamp(fund["score"] / 70 * 100)
         val_pct = clamp(val["score"] / 50 * 100)
         chips_pct = clamp(chips / 30 * 100)
-        market_mult = 1.00 if regime_dict["regime"] == "BULL" else 0.85 if regime_dict["regime"] == "NEUTRAL" else 0.55 if regime_dict["regime"] == "BEAR" else 0.75
+        market_mult = 1.00 if regime_dict["regime"] == "BULL" else 0.85 if regime_dict["regime"] == "NEUTRAL" else mp["bear_mult"] if regime_dict["regime"] == "BEAR" else 0.75
         raw = fund_pct * .30 + moat * .10 + val_pct * .15 + chips_pct * .15 + technical * .15 + breakout * .15
         final = clamp(raw * market_mult)
         distance_20_high = price / safe_float(x["HIGH_20"]) - 1 if safe_float(x["HIGH_20"]) > 0 else np.nan
         overheat = safe_float(x["RET_20"]) > .25 or safe_float(x["RSI"]) > 78 or (not pd.isna(distance_20_high) and distance_20_high > .03)
-        early_score = max(0, breakout - 15) if overheat else breakout
+        early_score = max(0, breakout - mp["overheat_penalty"]) if overheat else breakout
         if regime_dict["regime"] == "BEAR": early_score = max(0, early_score - 20)
         buy_score = clamp(final * .70 + early_score * .30)
         status_label = momentum_status(x["RET_20"], x["RSI"], x["VOL_RATIO"], price, x["MA20"], x["MA60"], distance_20_high)
@@ -2090,7 +2218,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
         ref20_close = safe_float(daily.iloc[-21].get("close")) if len(daily) >= 21 else np.nan
         change_20d_pct = (price / ref20_close - 1) * 100 if not pd.isna(ref20_close) and ref20_close > 0 else np.nan
         limit_status = limit_up_status(price, prev_close, safe_float(x.get("max")), safe_float(x.get("min")), day_change_pct)
-        decision = decision_label(buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"), market_regime=regime_dict["regime"])
+        decision = decision_label(buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"), market_regime=regime_dict["regime"], mode=mode)
         priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
         quality_inputs = {
             "基本面": any(not pd.isna(safe_float(fund.get(k))) for k in ["roe","roa","gross_margin","op_margin","eps_growth","revenue_growth"]),
@@ -2111,7 +2239,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict):
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
                 "護城河": round(moat,1), "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
-                "過熱": "是" if overheat else "否", "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]),
+                "過熱": "是" if overheat else "否", "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]), "策略模式": mode,
                 "趨勢": [round(float(v), 2) for v in daily["close"].tail(20).pct_change().fillna(0).cumsum().add(1).tolist()],
                 "daily": daily, "fund": fund, "moat_detail": moat_detail,
                 "_pit_note": "財報可得日以財報日期+45天、營收以日期+15天作保守代理。"
@@ -2189,18 +2317,18 @@ def prepare_pit_sources_batch(stock_ids, daily_days=1500):
     return result
 
 
-def calculate_stock_at(stock_id, regime_tag, regime_dict, as_of_idx=None, as_of_date=None):
+def calculate_stock_at(stock_id, regime_tag, regime_dict, as_of_idx=None, as_of_date=None, mode=DEFAULT_MODE):
     sources = prepare_pit_sources(stock_id, 1500)
     daily = add_technical_indicators(sources["daily"])
     if daily.empty: return None
     if as_of_date is None:
         idx = -1 if as_of_idx is None else as_of_idx
         as_of_date = pd.to_datetime(daily.iloc[idx]["date"])
-    return calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict if regime_dict else market_regime(as_of_date))
+    return calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict if regime_dict else market_regime(as_of_date), mode=mode)
 
 
-def calculate_stock(stock_id, regime_tag, regime_dict):
-    return calculate_stock_at(stock_id, regime_tag, regime_dict)
+def calculate_stock(stock_id, regime_tag, regime_dict, mode=DEFAULT_MODE):
+    return calculate_stock_at(stock_id, regime_tag, regime_dict, mode=mode)
 
 
 # =========================
@@ -2386,37 +2514,160 @@ def trade_costs(notional, fee, tax=0, slippage=0, side="buy"):
     return notional*fee + notional*slippage + (notional*tax if side=="sell" else 0)
 
 
-def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=10, start_date=None, end_date=None):
+def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=None, start_date=None, end_date=None, mode=DEFAULT_MODE, scan_mode="盤後"):
+    """單股 Point-in-Time 回測。
+    mode：保守/平衡/積極 — 決定進場門檻與停損停利倍數。
+    scan_mode：
+      - 盤後：用「當日收盤後」算出的買進分，隔一個交易日開盤才進場（V10 原始邏輯，較保守、有一天確認延遲）。
+      - 盤中：用「前一日收盤」算出的起漲分（breakout 子分數）先行判斷，當天開盤即進場，
+              模擬「盤中起漲雷達」提早一個交易日抓到起漲訊號的效果。兩者用同一套底層評分引擎，
+              差別只在「用哪一天的分數」與「哪一天進場」，方便公平比較。
+    """
+    mp = get_mode_params(mode)
+    if hold_days is None: hold_days = mp["hold_days"]
+    stop_mult, target_mult = mp["stop_atr"], mp["target_atr"]
     sources=prepare_pit_sources(stock_id,1500); daily=add_technical_indicators(sources["daily"])
     if daily.empty or len(daily)<250: return None
     daily["date"]=pd.to_datetime(daily["date"], errors="coerce")
-    mkt=get_yahoo_taiex(); equity=[]; trades=[]; cash=float(initial_capital); shares=0; entry_price=0; entry_date=None; entry_i=0
+    mkt=get_yahoo_taiex(); equity=[]; trades=[]; cash=float(initial_capital); shares=0; entry_price=0; entry_date=None; entry_i=0; entry_atr=np.nan; entry_reason=""
     start_ts=pd.Timestamp(start_date) if start_date is not None else None
     end_ts=pd.Timestamp(end_date) if end_date is not None else None
     for i in range(120,len(daily)-1):
         if start_ts is not None and daily.iloc[i]["date"] < start_ts: continue
         if end_ts is not None and daily.iloc[i]["date"] > end_ts: break
         row=daily.iloc[i]; next_row=daily.iloc[i+1]; date=pd.Timestamp(row["date"])
-        reg=market_regime(date,mkt); snap=calculate_stock_snapshot(stock_id,date,sources,reg)
-        if snap is None: continue
-        price=safe_float(row["close"]); atr=safe_float(row["ATR"])
-        if shares==0 and snap["決策"]=="🟢 可買" and not pd.isna(atr) and atr>0:
-            buy=safe_float(next_row.get("open"),price)*(1+slippage); qty=int(cash/(buy*(1+fee)))
-            if qty>0: shares=qty; cost=qty*buy; cash-=cost+cost*fee; entry_price=buy; entry_date=pd.Timestamp(next_row["date"]); entry_i=i+1
+        price=safe_float(row["close"])
+        if shares==0:
+            if scan_mode=="盤中" and i>=1:
+                sig_date=pd.Timestamp(daily.iloc[i-1]["date"])
+                reg=market_regime(sig_date,mkt); snap=calculate_stock_snapshot(stock_id,sig_date,sources,reg,mode=mode)
+                triggered = snap is not None and safe_float(snap.get("起漲分")) >= mp["radar_threshold"] and "轉弱" not in str(snap.get("狀態",""))
+                entry_row, entry_idx, trig_reason = row, i, "盤中起漲雷達"
+                atr = safe_float(daily.iloc[i-1].get("ATR"))
+            else:
+                reg=market_regime(date,mkt); snap=calculate_stock_snapshot(stock_id,date,sources,reg,mode=mode)
+                triggered = snap is not None and snap.get("決策")=="🟢 可買"
+                entry_row, entry_idx, trig_reason = next_row, i+1, "盤後確認"
+                atr = safe_float(row.get("ATR"))
+            if triggered and not pd.isna(atr) and atr>0:
+                buy=safe_float(entry_row.get("open"),price)*(1+slippage); qty=int(cash/(buy*(1+fee)))
+                if qty>0:
+                    shares=qty; cost=qty*buy; cash-=cost+cost*fee; entry_price=buy
+                    entry_date=pd.Timestamp(entry_row["date"]); entry_i=entry_idx; entry_atr=atr; entry_reason=trig_reason
         elif shares>0:
-            stop=entry_price-2*atr; target=entry_price+3*atr; low=safe_float(row.get("min"),price); high=safe_float(row.get("max"),price); exit_price=None; reason=None
+            atr = entry_atr if not pd.isna(entry_atr) and entry_atr>0 else safe_float(row["ATR"])
+            stop=entry_price-stop_mult*atr; target=entry_price+target_mult*atr
+            low=safe_float(row.get("min"),price); high=safe_float(row.get("max"),price); exit_price=None; reason=None
             if low<=stop: exit_price=stop*(1-slippage); reason="STOP"
             elif high>=target: exit_price=target*(1-slippage); reason="TARGET"
             elif i-entry_i>=hold_days: exit_price=safe_float(next_row.get("open"),price)*(1-slippage); reason="TIME"
             if exit_price:
                 gross=shares*exit_price; sell_cost=gross*(fee+tax); cash+=gross-sell_cost; pnl=(exit_price-entry_price)*shares-(shares*entry_price*fee)-sell_cost
-                trades.append({"entry":entry_price,"exit":exit_price,"pnl":pnl,"reason":reason,"entry_date":entry_date,"exit_date":date}); shares=0; entry_price=0
+                trades.append({"entry":entry_price,"exit":exit_price,"pnl":pnl,"reason":reason,"entry_date":entry_date,"exit_date":date,"entry_trigger":entry_reason}); shares=0; entry_price=0
         equity.append((date,cash+shares*price))
     if not equity:return None
     eq=pd.Series(dict(equity)); bench=get_benchmarks()
     metrics=performance_metrics(eq,trades,benchmark=bench)
-    metrics.update({"stock":stock_id,"equity":eq,"trades_detail":trades,"benchmarks":bench,"daily":daily,"hold_days":hold_days})
+    open_position=None
+    if shares>0:
+        last_price=safe_float(daily.iloc[len(daily)-1]["close"]) if end_ts is None else price
+        open_position={"entry_date":entry_date,"entry_price":entry_price,"shares":shares,"last_price":last_price,
+                        "unrealized_pct":(last_price/entry_price-1)*100 if entry_price>0 else np.nan,"trigger":entry_reason}
+    metrics.update({"stock":stock_id,"equity":eq,"trades_detail":trades,"benchmarks":bench,"daily":daily,
+                     "hold_days":hold_days,"mode":mode,"scan_mode":scan_mode,"open_position":open_position})
     return metrics
+
+
+STRATEGY_COMBOS = [("盤中", "積極"), ("盤中", "平衡"), ("盤中", "保守"), ("盤後", "積極"), ("盤後", "平衡"), ("盤後", "保守")]
+
+
+def strategy_compare_report(stock_id, initial_capital, fee, tax, slippage, start_date=None, end_date=None, combos=None):
+    """同一檔股票，用『盤中/盤後 × 保守/平衡/積極』六種組合各跑一次回測，
+    回報每種組合在指定區間內第一筆進場的日期與該筆報酬（若還持有中，回報未實現報酬）。
+    直接回答「哪一顆按鈕最會抓飆股」。
+    """
+    combos = combos or STRATEGY_COMBOS
+    rows = []
+    for scan_mode, mode in combos:
+        res = backtest_single(stock_id, initial_capital, fee, tax, slippage, start_date=start_date, end_date=end_date, mode=mode, scan_mode=scan_mode)
+        label = f"{scan_mode}{mode}"
+        if res is None:
+            rows.append({"策略": label, "進場日": "—", "報酬(%)": np.nan, "狀態": "資料不足", "出場原因": "—"})
+            continue
+        trades = res.get("trades_detail") or []
+        window_trades = [t for t in trades if start_date is None or pd.Timestamp(t["entry_date"]) >= pd.Timestamp(start_date)]
+        if window_trades:
+            t = window_trades[0]
+            pnl_pct = (t["exit"]/t["entry"]-1)*100
+            rows.append({"策略": label, "進場日": pd.Timestamp(t["entry_date"]).strftime("%Y-%m-%d"),
+                         "報酬(%)": round(pnl_pct, 2), "狀態": f"已出場({t['reason']})", "出場原因": t["reason"]})
+            continue
+        op = res.get("open_position")
+        if op and (start_date is None or pd.Timestamp(op["entry_date"]) >= pd.Timestamp(start_date)):
+            rows.append({"策略": label, "進場日": pd.Timestamp(op["entry_date"]).strftime("%Y-%m-%d"),
+                         "報酬(%)": round(op["unrealized_pct"], 2), "狀態": "持有中(未實現)", "出場原因": "—"})
+        else:
+            rows.append({"策略": label, "進場日": "—", "報酬(%)": np.nan, "狀態": "區間內未觸發訊號", "出場原因": "—"})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values("報酬(%)", ascending=False, na_position="last").reset_index(drop=True)
+    return out
+
+
+def strategy_leaderboard(stocks, initial_capital, fee, tax, slippage, start_date=None, end_date=None, combos=None, progress_cb=None, max_workers=3):
+    """對多檔股票 × 多種策略組合跑回測，把同一組合底下所有股票的交易『合併計算』，
+    統計勝率、平均報酬、最大回撤、Profit Factor、CAGR，找出真正有效的模式。
+    """
+    combos = combos or STRATEGY_COMBOS
+    jobs = [(s, sm, md) for s in stocks for sm, md in combos]
+
+    def run_one(job):
+        s, sm, md = job
+        try:
+            return job, backtest_single(s, initial_capital, fee, tax, slippage, start_date=start_date, end_date=end_date, mode=md, scan_mode=sm)
+        except Exception as e:
+            _log_api_error("strategy_leaderboard", s, e)
+            return job, None
+
+    results = parallel_map(jobs, run_one, max_workers=max_workers)
+    done = 0
+    by_combo = {c: {"trades": [], "equities": []} for c in combos}
+    for job, res in results:
+        done += 1
+        if progress_cb: progress_cb(done/len(jobs))
+        if res is None: continue
+        s, sm, md = job
+        by_combo[(sm, md)]["trades"].extend(res.get("trades_detail") or [])
+        eq = res.get("equity")
+        if eq is not None and len(eq): by_combo[(sm, md)]["equities"].append(eq)
+
+    rows = []
+    for (sm, md), agg in by_combo.items():
+        trades = agg["trades"]
+        if not trades:
+            rows.append({"策略": f"{sm}{md}", "交易筆數": 0, "勝率(%)": np.nan, "平均報酬(%)": np.nan,
+                         "最大回撤(%)": np.nan, "Profit Factor": np.nan, "CAGR(%)": np.nan})
+            continue
+        pnls = [float(t.get("pnl", 0)) for t in trades]
+        rets = [(t["exit"]/t["entry"]-1)*100 for t in trades]
+        wins = [p for p in pnls if p > 0]; losses = [p for p in pnls if p <= 0]
+        pf = (sum(wins)/abs(sum(losses))) if losses and sum(losses) != 0 else np.nan
+        # 用組合內所有股票的權益曲線等權重合成一條曲線來估 CAGR / MDD，避免單一大賺股票蓋掉全貌
+        cagr = np.nan; mdd = np.nan
+        if agg["equities"]:
+            norm = [eq/eq.iloc[0] for eq in agg["equities"]]
+            combo_eq = pd.concat(norm, axis=1).ffill().bfill().mean(axis=1)
+            m = performance_metrics(combo_eq)
+            cagr = m.get("cagr", np.nan) * 100 if not pd.isna(m.get("cagr", np.nan)) else np.nan
+            mdd = m.get("mdd", np.nan) * 100 if not pd.isna(m.get("mdd", np.nan)) else np.nan
+        rows.append({"策略": f"{sm}{md}", "交易筆數": len(trades), "勝率(%)": round(len(wins)/len(trades)*100, 1),
+                     "平均報酬(%)": round(float(np.mean(rets)), 2), "最大回撤(%)": round(mdd, 2) if not pd.isna(mdd) else np.nan,
+                     "Profit Factor": round(pf, 2) if not pd.isna(pf) else np.nan, "CAGR(%)": round(cagr, 2) if not pd.isna(cagr) else np.nan})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(["Profit Factor", "平均報酬(%)"], ascending=False, na_position="last").reset_index(drop=True)
+        out.insert(0, "排名", np.arange(1, len(out)+1))
+    return out
 
 
 def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, slippage=0.0015, rebalance_days=20, progress_cb=None, max_workers=3):
@@ -2924,13 +3175,18 @@ with tab_intraday:
         </div>
         """, unsafe_allow_html=True)
 
+        intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["🛡 保守", "⚖ 平衡", "🚀 積極"], horizontal=True, index=1, key="intraday_mode_choice",
+                                         help="只調整「起漲訊號」的雷達分門檻：保守最嚴格、訊號最少；積極門檻最低、進場最早也最容易誤觸。")
+        intraday_mode = {"🛡 保守": "保守", "⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
+
         if st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True):
             with st.spinner("連線交易所並掃描市場中…"):
                 try:
-                    live = run_intraday_scan(u, top_n=30)
+                    live = run_intraday_scan(u, top_n=30, mode=intraday_mode)
                     save_intraday_scan(live)
                     st.session_state["intraday_scan_out"] = live
                     st.session_state["intraday_scan_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    st.session_state["intraday_scan_mode"] = intraday_mode
                     st.rerun()
                 except Exception as exc:
                     _log_api_error("run_intraday_scan", "-", exc)
@@ -3070,6 +3326,27 @@ with tab_intraday:
                 ] if c in live.columns]
                 st.dataframe(style_intraday_table(live[advanced_cols]), use_container_width=True, hide_index=True)
                 st.caption("原始「決策」保留盤後模型結論；「行動」只是盤中首頁的使用者語言翻譯。盤中 AI = 70% 最近盤後買進分 + 30% 盤中動能分。")
+
+            st.markdown("### ⚡ 盤中起漲雷達")
+            radar_mode_used = st.session_state.get("intraday_scan_mode", DEFAULT_MODE)
+            st.caption(f"目前門檻：{radar_mode_used} 模式。爆量突破分／分時動能分／VWAP強弱／突破20日高／主力買盤強度（代理指標）綜合成「起漲雷達分」。")
+            if "起漲雷達分" in live.columns:
+                radar_view = live.sort_values("起漲雷達分", ascending=False)
+                radar_signal_only = st.checkbox("只看有訊號的股票（🟢起漲訊號／🟡醞釀中）", value=True, key="radar_signal_only")
+                if radar_signal_only and "雷達訊號" in radar_view.columns:
+                    radar_view = radar_view[radar_view["雷達訊號"] != "⚪ 不明顯"]
+                radar_cols = [c for c in [
+                    "股票代碼", "名稱", "即時價", "即時漲跌%", "起漲雷達分", "雷達訊號",
+                    "爆量突破分", "分時動能分", "VWAP強弱", "突破20日高", "主力買盤強度"
+                ] if c in radar_view.columns]
+                st.dataframe(
+                    radar_view[radar_cols].head(30), use_container_width=True, hide_index=True,
+                    column_config={
+                        "起漲雷達分": st.column_config.ProgressColumn("起漲雷達分", min_value=0, max_value=100, format="%.0f"),
+                        "即時漲跌%": st.column_config.NumberColumn("即時漲跌%", format="%.2f%%"),
+                    },
+                )
+                st.caption("盤中快照沒有分時明細與真實委託單資料，VWAP強弱、主力買盤強度是在此限制下的合理代理指標，不是交易所原始委買賣數據；僅供研究排序，不是進場保證。")
         else:
             st.info("尚未執行盤中掃描。按上方「🔍 掃描今日盤中機會」即可。")
 
@@ -3103,11 +3380,16 @@ with tab_eod:
     if universe_df.empty:
         st.error("無法取得全市場股票清單，可到「⚙️ 系統設定」的 API 診斷檢查原因。")
     else:
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             market_choice = st.radio("市場", ["🌐 全市場", "🏛️ 僅上市", "🏬 僅上櫃"], horizontal=True)
         with c2:
             strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1)
+        with c3:
+            eod_mode_choice = st.radio("🌙 盤後策略模式", ["🛡 保守", "⚖ 平衡", "🚀 積極"], horizontal=True, index=1,
+                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：保守門檻最高、訊號最少；積極門檻最低、訊號最多也最容易誤觸。")
+        eod_mode = {"🛡 保守": "保守", "⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(eod_mode_choice, DEFAULT_MODE)
+        st.session_state["eod_mode"] = eod_mode
 
         if market_choice == "🏛️ 僅上市": uni = universe_df[universe_df["type"].str.lower() == "twse"]
         elif market_choice == "🏬 僅上櫃": uni = universe_df[universe_df["type"].str.lower() == "tpex"]
@@ -3164,7 +3446,7 @@ with tab_eod:
                             try:
                                 sources = batch_sources.get(sid, {})
                                 if not sources.get("daily", pd.DataFrame()).empty:
-                                    result = calculate_stock_snapshot(sid, pd.Timestamp(datetime.now().date()), sources, regime)
+                                    result = calculate_stock_snapshot(sid, pd.Timestamp(datetime.now().date()), sources, regime, mode=eod_mode)
                                 else:
                                     result = None
                                 if result:
@@ -3521,7 +3803,7 @@ with tab_verify:
 
 with tab_advanced:
     st.warning("⚠️ 研究用途：以下工具提供給量化研究與策略驗證使用。一般投資決策不需要操作。AI戰績已自動更新，無需在此建立校準。")
-    sub_year, sub_week, sub_single, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬(專家)", "🤖 一週實測", "📉 單股回測", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
+    sub_year, sub_week, sub_single, sub_compare, sub_leaderboard, sub_portfolio, sub_wf, sub_strategy = st.tabs(["⏳ 年份模擬(專家)", "🤖 一週實測", "📉 單股回測", "📊 策略比較", "🏆 策略排行榜", "💼 投組回測", "🧪 Walk-Forward", "🧠 策略驗證"])
     def build_equity_benchmark_figure(result, title="資產曲線 vs Benchmark"):
         eq = result.get("equity", pd.Series(dtype=float))
         fig = go.Figure()
@@ -3654,24 +3936,105 @@ with tab_advanced:
 
     with sub_single:
         st.subheader("📉 單股研究級回測")
-        if stocks:
-            selected=st.selectbox("選擇股票",stocks)
-            if st.button("▶️ 執行單股回測",type="primary"):
-                with st.status(f"📉 {selected} Point-in-Time 回測中…", expanded=False):
-                    st.session_state["single_backtest_res"]=backtest_single(selected,initial_capital,fee,tax,slippage,hold_days=hold_days)
-            result=st.session_state.get("single_backtest_res")
-            if result:
-                metric_grid(result); ai_explain(result)
-                bc=st.columns(4)
-                bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A")
-                bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
-                bc[2].metric("Beta / TWII", f"{result.get('beta_TWII',np.nan):.2f}" if not pd.isna(result.get('beta_TWII',np.nan)) else "N/A")
-                bc[3].metric("持有天數", f"{result.get('hold_days',hold_days)} 天")
-                fig=build_backtest_technical_figure(result)
-                st.plotly_chart(fig,use_container_width=True)
-                with st.expander("📋 交易明細"): st.dataframe(pd.DataFrame(result.get("trades_detail",[])),use_container_width=True,hide_index=True)
-                with st.expander("🧠 AI 研究摘要"):
-                    st.write("這個策略不是單看技術訊號，而是用目前系統的買進分與市場位階做歷史判斷；每個歷史日只使用當日以前的資料。")
+        st.caption("輸入股票代碼＋起訖日期＋想測試的掃描模式與策略，直接看該組合在這段區間會不會抓到訊號、什麼時候進場。")
+        sc1, sc2, sc3 = st.columns([1.2, 1, 1])
+        with sc1:
+            single_stock_input = st.text_input("股票", value=(stocks[0] if stocks else "5351"), key="single_bt_stock").strip()
+        with sc2:
+            single_start = st.date_input("開始日期", value=(datetime.now() - timedelta(days=90)).date(), key="single_bt_start")
+        with sc3:
+            single_end = st.date_input("結束日期", value=datetime.now().date(), key="single_bt_end")
+        sc4, sc5 = st.columns(2)
+        with sc4:
+            single_scan_mode = st.radio("掃描模式", ["盤中", "盤後"], horizontal=True, key="single_bt_scanmode",
+                                         help="盤中：用前一日收盤算出的起漲分，當天開盤即進場，抓訊號較早。盤後：用當日收盤確認的買進分，隔一交易日開盤才進場，較保守。")
+        with sc5:
+            single_mode = st.radio("策略", ["保守", "平衡", "積極"], horizontal=True, index=1, key="single_bt_mode")
+        if single_stock_input and st.button("▶️ 執行單股回測", type="primary"):
+            with st.status(f"📉 {single_stock_input}（{single_scan_mode}・{single_mode}）Point-in-Time 回測中…", expanded=False):
+                st.session_state["single_backtest_res"] = backtest_single(
+                    single_stock_input, initial_capital, fee, tax, slippage,
+                    start_date=single_start, end_date=single_end, mode=single_mode, scan_mode=single_scan_mode)
+        result=st.session_state.get("single_backtest_res")
+        if result:
+            metric_grid(result); ai_explain(result)
+            bc=st.columns(4)
+            bc[0].metric("^TWII 超額", f"{result.get('alpha_TWII',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_TWII',np.nan)) else "N/A")
+            bc[1].metric("0050 超額", f"{result.get('alpha_0050_TW',np.nan)*100:.2f}%" if not pd.isna(result.get('alpha_0050_TW',np.nan)) else "N/A")
+            bc[2].metric("Beta / TWII", f"{result.get('beta_TWII',np.nan):.2f}" if not pd.isna(result.get('beta_TWII',np.nan)) else "N/A")
+            bc[3].metric("持有天數", f"{result.get('hold_days','—')} 天")
+            fig=build_backtest_technical_figure(result)
+            st.plotly_chart(fig,use_container_width=True)
+            op = result.get("open_position")
+            if op:
+                st.info(f"📌 目前仍持有中：{pd.Timestamp(op['entry_date']).strftime('%Y-%m-%d')} 進場（{op.get('trigger','')}），未實現報酬 {op['unrealized_pct']:+.2f}%。")
+            with st.expander("📋 交易明細", expanded=True):
+                td = pd.DataFrame(result.get("trades_detail", []))
+                if not td.empty:
+                    td["entry_date"] = pd.to_datetime(td["entry_date"]).dt.strftime("%Y-%m-%d")
+                    td["exit_date"] = pd.to_datetime(td["exit_date"]).dt.strftime("%Y-%m-%d")
+                    td["報酬(%)"] = ((td["exit"]/td["entry"]-1)*100).round(2)
+                st.dataframe(td, use_container_width=True, hide_index=True)
+            with st.expander("🧠 AI 研究摘要"):
+                st.write("這個策略不是單看技術訊號，而是用目前系統的買進分／起漲分與市場位階做歷史判斷；每個歷史日只使用當日以前的資料。")
+
+    with sub_compare:
+        st.subheader("📊 策略比較報表")
+        st.caption("同一檔股票，一次跑「盤中/盤後 × 保守/平衡/積極」六種組合，直接回答哪一顆按鈕最會抓飆股。")
+        cc1, cc2, cc3 = st.columns([1.2, 1, 1])
+        with cc1:
+            cmp_stock = st.text_input("股票", value=(stocks[0] if stocks else "5351"), key="cmp_bt_stock").strip()
+        with cc2:
+            cmp_start = st.date_input("開始日期", value=(datetime.now() - timedelta(days=60)).date(), key="cmp_bt_start")
+        with cc3:
+            cmp_end = st.date_input("結束日期", value=datetime.now().date(), key="cmp_bt_end")
+        if cmp_stock and st.button("🚀 執行策略比較", type="primary"):
+            with st.status(f"📊 {cmp_stock} 六種策略組合比較中…", expanded=False):
+                st.session_state["strategy_cmp_res"] = strategy_compare_report(
+                    cmp_stock, initial_capital, fee, tax, slippage, start_date=cmp_start, end_date=cmp_end)
+        cmp_res = st.session_state.get("strategy_cmp_res")
+        if cmp_res is not None and not cmp_res.empty:
+            st.dataframe(cmp_res, use_container_width=True, hide_index=True)
+            valid = cmp_res.dropna(subset=["報酬(%)"])
+            if not valid.empty:
+                best = valid.iloc[0]
+                st.success(f"🏆 這段區間裡，**{best['策略']}** 抓得最早／表現最好：{best['進場日']} 進場，報酬 {best['報酬(%)']:+.2f}%（{best['狀態']}）。")
+            st.caption("「盤中」模式用前一日收盤的起漲分、當天開盤即進場；「盤後」模式用當日收盤確認的買進分、隔一交易日才進場，兩者用同一套引擎，只差進場時機與門檻。")
+
+    with sub_leaderboard:
+        st.subheader("🏆 策略排行榜")
+        st.caption("對多檔股票 × 多種策略組合跑回測，把每個組合底下的所有交易合併統計，找出真正有效的模式。")
+        lb_preset = st.radio("測試清單", ["常用四檔(2330/5351/3481/2454)", "我的追蹤清單", "自訂輸入", "全市場抽樣"], horizontal=True, key="lb_preset")
+        if lb_preset == "常用四檔(2330/5351/3481/2454)":
+            lb_stocks = ["2330", "5351", "3481", "2454"]
+        elif lb_preset == "我的追蹤清單":
+            lb_stocks = stocks
+        elif lb_preset == "自訂輸入":
+            lb_text = st.text_area("股票代碼（逗號或換行分隔）", value="2330, 5351, 3481, 2454", key="lb_custom")
+            lb_stocks = clean_stock_list(lb_text)
+        else:
+            lb_sample_n = st.slider("全市場抽樣檔數", 10, 100, 30, 10, key="lb_sample_n",
+                                     help="全市場檔數太多，逐檔跑六種組合回測會消耗大量 FinMind 額度與時間，先用抽樣估計模式優劣。")
+            uni_lb = get_stock_universe()
+            lb_stocks = uni_lb["stock_id"].sample(n=min(lb_sample_n, len(uni_lb)), random_state=int(datetime.now().strftime("%Y%m%d"))).tolist() if not uni_lb.empty else []
+        lc1, lc2 = st.columns(2)
+        with lc1:
+            lb_start = st.date_input("開始日期", value=(datetime.now() - timedelta(days=180)).date(), key="lb_start")
+        with lc2:
+            lb_end = st.date_input("結束日期", value=datetime.now().date(), key="lb_end")
+        st.caption(f"目前清單：{len(lb_stocks)} 檔 × 6 種策略組合 = 約 {len(lb_stocks)*6} 次單股回測。")
+        if lb_stocks and st.button("🏆 執行策略排行榜", type="primary"):
+            prog = st.progress(0)
+            with st.status("🏆 逐檔逐模式回測中…", expanded=False):
+                st.session_state["strategy_leaderboard_res"] = strategy_leaderboard(
+                    lb_stocks, initial_capital, fee, tax, slippage, start_date=lb_start, end_date=lb_end,
+                    max_workers=scan_workers, progress_cb=lambda p: prog.progress(min(1.0, p)))
+        lb_res = st.session_state.get("strategy_leaderboard_res")
+        if lb_res is not None and not lb_res.empty:
+            st.dataframe(lb_res, use_container_width=True, hide_index=True)
+            top = lb_res.iloc[0]
+            st.success(f"🏆 目前清單裡表現最好的模式：**{top['策略']}**（勝率 {top['勝率(%)']}%、平均報酬 {top['平均報酬(%)']}%、Profit Factor {top['Profit Factor']}）。樣本數 {top['交易筆數']} 筆，樣本越少統計越不穩定。")
+            st.caption("CAGR／最大回撤是把清單內所有股票的權益曲線等權重合成後估算，避免單一大漲股票蓋掉整體結果；交易筆數太少（例如個位數）時，勝率與 PF 僅供參考。")
 
     with sub_portfolio:
         st.subheader("💼 投組回測：真實成本 + 換股成本")
