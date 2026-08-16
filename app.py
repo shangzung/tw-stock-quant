@@ -4022,7 +4022,10 @@ with tab_advanced:
         n = len(trades)
         if n:
             wins = sum(1 for t in trades if t["exit"] > t["entry"])
-            st.caption(f"📌 這段期間系統總共進出場 {n} 次：賺錢 {wins} 次、賠錢 {n-wins} 次。上面顯示的是最近一次。完整每一筆紀錄在下面「進階數據」裡可以看。")
+            first = trades[0]
+            first_entry = pd.Timestamp(first["entry_date"]).strftime("%Y-%m-%d")
+            st.markdown(f"🔎 **這段期間第一次進場：{first_entry}**（訊號：{first.get('entry_trigger','—')}）— 想知道引擎抓訊號快不快，看這個日期比上面卡片準。")
+            st.caption(f"📌 這段期間系統總共進出場 {n} 次：賺錢 {wins} 次、賠錢 {n-wins} 次。上面卡片顯示的是最近一次（目前仍持有中則優先顯示）。完整每一筆紀錄在下面「進階數據」裡可以看。")
 
     with sub_single:
         st.subheader("📉 單股研究級回測")
