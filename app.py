@@ -42,6 +42,8 @@ CACHE_DIR.mkdir(exist_ok=True)
 TOKEN_FILE = CACHE_DIR / "finmind_token.json"
 SCAN_CACHE_FILE = CACHE_DIR / "last_scan.pkl"
 HOLDINGS_FILE = CACHE_DIR / "holdings.json"
+# V11.2：找飆股候選快取（盤後算好、盤中直接讀，不在盤中重算 same_day_reaction_score）
+HOT_STOCK_CACHE_FILE = CACHE_DIR / "hot_stock_scan.pkl"
 
 
 
@@ -243,6 +245,24 @@ def clear_saved_scan():
         return False
 
 
+def save_hot_stock_scan(df, mode=None):
+    """找飆股候選存檔：盤後掃描算好後存一次，App 重開也不會消失，隔天盤中直接讀。"""
+    try:
+        pd.to_pickle({"out": df, "mode": mode, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, HOT_STOCK_CACHE_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def load_hot_stock_scan():
+    try:
+        if HOT_STOCK_CACHE_FILE.exists():
+            return pd.read_pickle(HOT_STOCK_CACHE_FILE)
+    except Exception:
+        pass
+    return None
+
+
 def _coerce_holdings_dtypes(df):
     """確保庫存表格的欄位型別跟 column_config 一致（代碼=文字、股數/成本=數字），
     不然 st.data_editor 在型別對不上時會直接丟出 StreamlitAPIException 讓整頁掛掉。"""
@@ -332,6 +352,14 @@ if st.session_state["market_scan_out"] is None:
         st.session_state["market_scan_candidates"] = _saved_scan.get("candidates")
         st.session_state["market_scan_top5"] = _saved_scan.get("top5")
         st.session_state["market_scan_saved_at"] = _saved_scan.get("saved_at")
+if "hot_stock_out" not in st.session_state: st.session_state["hot_stock_out"] = None
+if "hot_stock_saved_at" not in st.session_state: st.session_state["hot_stock_saved_at"] = None
+if st.session_state["hot_stock_out"] is None:
+    # 找飆股候選同樣重開 App 也不會消失，直到下一次盤後深度掃描才會被覆蓋。
+    _saved_hot = load_hot_stock_scan()
+    if isinstance(_saved_hot, dict):
+        st.session_state["hot_stock_out"] = _saved_hot.get("out")
+        st.session_state["hot_stock_saved_at"] = _saved_hot.get("saved_at")
 if "year_sim_res" not in st.session_state: st.session_state["year_sim_res"] = None
 if "week_sim_res" not in st.session_state: st.session_state["week_sim_res"] = None
 if "candidate_out" not in st.session_state: st.session_state["candidate_out"] = None
@@ -769,6 +797,7 @@ st.markdown("""
     .ip-badges { display:flex; gap:7px; flex-wrap:wrap; margin-top:11px; }
     .ip-action, .ip-risk, .ip-change { display:inline-block; padding:4px 9px; border-radius:999px; font-size:11.5px; font-weight:800; border:1px solid rgba(255,255,255,.08); }
     .ip-buy { background:rgba(48,209,88,.18); color:#62e981; }
+    .ip-hot { background:rgba(255,105,0,.18); color:#ff9f4e; }
     .ip-wait { background:rgba(255,214,10,.16); color:#ffe45e; }
     .ip-observe { background:rgba(255,159,10,.16); color:#ffb454; }
     .ip-skip { background:rgba(255,69,58,.16); color:#ff756d; }
@@ -1539,13 +1568,22 @@ def main_force_buy_score(row):
 
 
 def intraday_radar_score(row):
-    """把五個盤中子分數整合成單一「起漲雷達分」，用於⚡盤中起漲雷達的排序與篩選。"""
+    """把『反應分』＋五個盤中子分數整合成單一「起漲雷達分」，用於⚡盤中起漲雷達的排序與篩選。
+
+    V11.2：新增「反應分」（same_day_reaction_score，見 hot_stock_signal_from_daily）當第 6 個
+    子分數，且權重最高——因為它吃的是昨晚收盤後就已經定案的真實 OHLCV（跳空／爆量／收盤位置），
+    比其餘 5 個只能用即時快照估計的代理指標（VWAP強弱、主力買盤強度…）更可靠，也跟單股回測
+    用的是同一套公式。缺資料時（例如剛好沒有前一晚的盤後掃描）退回中性值 50，不影響其餘子分數。
+    """
+    reaction = safe_float(row.get("反應分"), 50.0)
+    if pd.isna(reaction):
+        reaction = 50.0
     vb = volume_breakout_score(row)
     mo = intraday_momentum_score(row)
     vw = vwap_strength_score(row)
     hb = high20_breakout_score(row)
     mf = main_force_buy_score(row)
-    return clamp(vb * .25 + mo * .20 + vw * .15 + hb * .25 + mf * .15)
+    return clamp(reaction * .25 + vb * .20 + mo * .15 + vw * .10 + hb * .20 + mf * .10)
 
 
 def same_day_reaction_score(row, prev_close, avg_vol20):
@@ -1580,6 +1618,79 @@ def same_day_reaction_score(row, prev_close, avg_vol20):
     return clamp(score)
 
 
+def hot_stock_signal_from_daily(daily_ind, mode=DEFAULT_MODE):
+    """V11.2 找飆股訊號：直接複用單股回測 backtest_single(scan_mode="盤中") 用的
+    same_day_reaction_score，確保『正式盤後掃描』跟『單股回測』永遠是同一套訊號，
+    不會再有「回測抓得到、正式掃描抓不到」的落差。
+
+    吃的三個東西（跳空幅度／爆量倍數／收盤位置）全部是「昨晚收盤後就已經定案」的日K，
+    不需要 FinMind、也不需要即時報價，所以設計上就該在『盤後』算好一次：
+    今晚算出來的分數，明天一整個交易日都不會再變，盤中只需要拿它當基礎分，
+    疊加當下的即時漲跌／成交量即可，不必也不應該在盤中重算。
+
+    daily_ind：已跑過 add_technical_indicators 的日K（至少需要最後一根「今天」與其前 21 根）。
+    回傳：本檔股票「明天開盤」用的反應分與拆解出的三個子欄位；資料不足回傳 None。
+    """
+    if daily_ind is None or daily_ind.empty or len(daily_ind) < 25:
+        return None
+    d = daily_ind.reset_index(drop=True)
+    j = len(d) - 1
+    row = d.iloc[j]
+    prev_close = safe_float(d.iloc[j - 1].get("close"))
+    avg_vol20 = safe_float(d["volume"].iloc[max(0, j - 20):j].mean())
+    score = same_day_reaction_score(row, prev_close, avg_vol20)
+
+    o, h, l, c, v = [safe_float(row.get(k)) for k in ("open", "max", "min", "close", "volume")]
+    gap_pct = (o / prev_close - 1) * 100 if (not pd.isna(prev_close) and prev_close > 0 and not pd.isna(o)) else np.nan
+    vol_mult = v / avg_vol20 if (not pd.isna(avg_vol20) and avg_vol20 > 0 and not pd.isna(v)) else np.nan
+    rng = h - l if (not pd.isna(h) and not pd.isna(l)) else 0
+    close_pos = (c - l) / rng * 100 if (rng and rng > 0 and not pd.isna(c)) else np.nan
+
+    mp = get_mode_params(mode)
+    if score >= mp["reaction_threshold"]:
+        label = "🚀 找飆股訊號"
+    elif score >= mp["reaction_threshold"] * 0.6:
+        label = "🟡 醞釀中"
+    else:
+        label = "⚪ 不明顯"
+
+    return {
+        "反應分": round(score, 1),
+        "跳空%": round(gap_pct, 2) if not pd.isna(gap_pct) else np.nan,
+        "量比": round(vol_mult, 2) if not pd.isna(vol_mult) else np.nan,
+        "收盤位置%": round(close_pos, 1) if not pd.isna(close_pos) else np.nan,
+        "反應訊號日": pd.Timestamp(row["date"]).strftime("%Y-%m-%d") if "date" in row.index and pd.notna(row.get("date")) else None,
+        "找飆股訊號": label,
+    }
+
+
+def run_hot_stock_scan(batch_sources, universe_df, mode=DEFAULT_MODE):
+    """對『盤後已經抓過日K的清單』（沿用 batch_sources，0 額外 API 額度）逐檔算找飆股訊號，
+    產生『明天開盤候選名單』。這份名單存成獨立快取，隔天盤中掃描直接讀取合併，不重算。
+    """
+    rows = []
+    name_map = universe_df.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in universe_df.columns else {}
+    for sid, sources in (batch_sources or {}).items():
+        try:
+            daily = sources.get("daily", pd.DataFrame())
+            if daily is None or daily.empty:
+                continue
+            ind = add_technical_indicators(daily)
+            sig = hot_stock_signal_from_daily(ind, mode=mode)
+            if sig is None:
+                continue
+            sig["股票代碼"] = sid
+            sig["名稱"] = name_map.get(sid, "")
+            rows.append(sig)
+        except Exception as exc:
+            _log_api_error("run_hot_stock_scan", sid, exc)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).sort_values("反應分", ascending=False).reset_index(drop=True)
+    out.insert(0, "排名", np.arange(1, len(out) + 1))
+    return out
+
+
 def intraday_radar_signal(radar_score, mode=DEFAULT_MODE):
     mp = get_mode_params(mode)
     if radar_score >= mp["radar_threshold"]:
@@ -1600,13 +1711,22 @@ def _intraday_score(row):
     return clamp(score)
 
 def _intraday_action(row):
-    """把盤後正式決策翻譯成盤中首頁的「行動語言」。不修改原始決策。"""
+    """把盤後正式決策翻譯成盤中首頁的「行動語言」。不修改原始決策。
+
+    V11.2：「🚀 找飆股」是獨立於正式決策之外的第二條線——只要昨晚的反應分
+    （same_day_reaction_score，跳空＋爆量＋收盤位置）達到門檻，就算正式的
+    買進分決策還沒到「🟢 可買」，也值得單獨標出來，優先順序排在正式可買之後、
+    一般觀察之前，不冒充正式買進訊號。
+    """
     decision = str(row.get("決策", "")).strip()
     pct = safe_float(row.get("即時漲跌%"), 0)
     status = str(row.get("狀態", ""))
     risk = str(row.get("風險", ""))
+    hot_signal = str(row.get("找飆股訊號", ""))
     if "🟢 可買" in decision:
         return "🟢 可買"
+    if "🚀 找飆股訊號" in hot_signal and "🔴 高" not in risk:
+        return "🚀 找飆股"
     if "⚠️ 漲停勿追" in decision or "🟡 過熱觀察" in decision:
         return "🟠 觀察"
     if "🟡 觀察" in decision:
@@ -1637,13 +1757,20 @@ def _intraday_change_label(row):
 
 
 def _intraday_action_rank(label):
-    return {"🟢 可買": 0, "🟡 等待買點": 1, "🟠 觀察": 2, "🔴 先跳過": 3}.get(label, 9)
+    return {"🟢 可買": 0, "🚀 找飆股": 1, "🟡 等待買點": 2, "🟠 觀察": 3, "🔴 先跳過": 4}.get(label, 9)
 
 
 def _intraday_reason(row):
     reasons = []
     turnover = safe_float(row.get("成交金額"), 0)
     change = str(row.get("盤中變化", ""))
+    hot_signal = str(row.get("找飆股訊號", ""))
+    if "🚀 找飆股訊號" in hot_signal:
+        gap = safe_float(row.get("跳空%"), np.nan)
+        vol_mult = safe_float(row.get("反應量比"), np.nan)
+        gap_txt = f"跳空{gap:+.1f}%" if not pd.isna(gap) else "跳空走高"
+        vol_txt = f"爆量{vol_mult:.1f}倍" if not pd.isna(vol_mult) else "爆量"
+        reasons.append(f"昨日反應強（{gap_txt}・{vol_txt}）")
     if "強勢" in change or "轉強" in change:
         reasons.append("盤中動能改善")
     if turnover >= 1_000_000_000:
@@ -1678,11 +1805,21 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
         base = saved["out"][keep].drop_duplicates("股票代碼")
         out = out.merge(base, on="股票代碼", how="left")
 
+    # V11.2：找飆股候選（same_day_reaction_score，昨晚盤後就算好，盤中直接讀、不重算）。
+    hot = load_hot_stock_scan()
+    if isinstance(hot, dict) and isinstance(hot.get("out"), pd.DataFrame) and not hot["out"].empty:
+        hot_keep = [c for c in ["股票代碼", "反應分", "跳空%", "量比", "收盤位置%", "找飆股訊號"] if c in hot["out"].columns]
+        hot_base = hot["out"][hot_keep].drop_duplicates("股票代碼").rename(columns={"量比": "反應量比"})
+        out = out.merge(hot_base, on="股票代碼", how="left")
+
     if "買進分" in out.columns:
         out["基準買進分"] = pd.to_numeric(out["買進分"], errors="coerce").fillna(50)
     else:
         out["基準買進分"] = 50.0
-    for _c, _default in [("風險", "🟡 中"), ("決策", ""), ("狀態", ""), ("資料品質", ""), ("量比", 1.0), ("起漲分", np.nan)]:
+    for _c, _default in [
+        ("風險", "🟡 中"), ("決策", ""), ("狀態", ""), ("資料品質", ""), ("量比", 1.0), ("起漲分", np.nan),
+        ("反應分", np.nan), ("跳空%", np.nan), ("反應量比", np.nan), ("收盤位置%", np.nan), ("找飆股訊號", "⚪ 不明顯"),
+    ]:
         if _c not in out.columns:
             out[_c] = _default
 
@@ -3209,9 +3346,9 @@ with tab_intraday:
         </div>
         """, unsafe_allow_html=True)
 
-        intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["⚖ 平衡", "🚀 積極"], horizontal=True, index=0, key="intraday_mode_choice",
-                                         help="只調整「起漲訊號」的雷達分門檻：平衡門檻較高、訊號較少較嚴謹；積極門檻最低、進場最早也最容易誤觸。")
-        intraday_mode = {"⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
+        intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["⚖ 穩健", "🚀 找飆股"], horizontal=True, index=0, key="intraday_mode_choice",
+                                         help="只調整「起漲訊號」的雷達分門檻：穩健門檻較高、訊號較少較嚴謹；找飆股門檻最低、進場最早也最容易誤觸。")
+        intraday_mode = {"⚖ 穩健": "平衡", "🚀 找飆股": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
 
         if st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True):
             with st.spinner("連線交易所並掃描市場中…"):
@@ -3246,7 +3383,7 @@ with tab_intraday:
             for _, r in top3.iterrows():
                 action = str(r.get("行動", "🟠 觀察"))
                 risk = str(r.get("風險", "🟡 中"))
-                action_cls = "ip-buy" if "🟢" in action else "ip-wait" if "🟡" in action else "ip-observe" if "🟠" in action else "ip-skip"
+                action_cls = "ip-buy" if "🟢" in action else "ip-hot" if "🚀" in action else "ip-wait" if "🟡" in action else "ip-observe" if "🟠" in action else "ip-skip"
                 risk_cls = "ip-risk-low" if "🟢" in risk else "ip-risk-mid" if "🟡" in risk else "ip-risk-high"
                 ai = safe_float(r.get("盤中 AI"), np.nan)
                 base = safe_float(r.get("基準買進分"), np.nan)
@@ -3316,18 +3453,22 @@ with tab_intraday:
                     ai_text = "—" if pd.isna(ai) else f"{ai:.1f}"
                     base_text = "—" if pd.isna(base) else f"{base:.1f}"
                     mom_text = "—" if pd.isna(momentum) else f"{momentum:.1f}"
+                    reaction = safe_float(r.get("反應分"), np.nan)
+                    hot_signal = r.get("找飆股訊號", "⚪ 不明顯")
+                    reaction_text = "—" if pd.isna(reaction) else f"{reaction:.0f}"
                     st.markdown("<div class='intraday-detail-title'>🧠 AI 分析</div>", unsafe_allow_html=True)
                     st.markdown(f"""
                     <div class="intraday-detail-grid">
                         <div class="intraday-detail-box"><div class="label">買進分</div><div class="value">{base_text}</div></div>
                         <div class="intraday-detail-box"><div class="label">盤中動能</div><div class="value">{mom_text}</div></div>
+                        <div class="intraday-detail-box"><div class="label">反應分</div><div class="value">{reaction_text}</div></div>
                         <div class="intraday-detail-box"><div class="label">盤中 AI</div><div class="value">{ai_text}</div></div>
                         <div class="intraday-detail-box"><div class="label">成交金額</div><div class="value">{turnover_text}</div></div>
                         <div class="intraday-detail-box"><div class="label">風險</div><div class="value">{risk}</div></div>
                     </div>
                     """, unsafe_allow_html=True)
                     st.markdown(f"**🎯 現在怎麼處理：{action}**")
-                    st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}")
+                    st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}　｜　找飆股：{hot_signal}")
                     st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
                     st.markdown(f"**📈 現價：** {current_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
                     st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
@@ -3335,6 +3476,8 @@ with tab_intraday:
                         st.info("盤後模型仍維持「不買」；盤中首頁的「等待買點」只代表今天值得重新觀察，不代表進場條件已成立。")
                     elif "🟢 可買" in str(formal_decision):
                         st.success("盤後模型已達正式進場門檻；仍請搭配風險與盤中狀態判斷，不把分數視為報酬保證。")
+                    if "🚀 找飆股訊號" in str(hot_signal) and "🟢 可買" not in str(formal_decision):
+                        st.warning("「🚀 找飆股」只代表昨天的跳空／爆量／收盤位置反應強，是比正式買進分更快、也更容易誤觸的訊號，不是正式進場門檻。")
 
             st.markdown("### 📋 一般模式")
             simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "盤中 AI", "行動", "風險"] if c in live.columns]
@@ -3356,14 +3499,14 @@ with tab_intraday:
                     "排名", "股票代碼", "名稱", "即時價", "即時漲跌%", "成交金額",
                     "基準買進分", "盤中動能分", "盤中 AI", "AI變化", "行動", "盤中變化",
                     "決策", "風險", "狀態", "資料品質", "近1日漲跌%", "近5日漲跌%", "近20日漲跌%",
-                    "優先級", "量比", "趨勢", "說明"
+                    "優先級", "量比", "趨勢", "說明", "反應分", "找飆股訊號", "跳空%", "反應量比",
                 ] if c in live.columns]
                 st.dataframe(style_intraday_table(live[advanced_cols]), use_container_width=True, hide_index=True)
-                st.caption("原始「決策」保留盤後模型結論；「行動」只是盤中首頁的使用者語言翻譯。盤中 AI = 70% 最近盤後買進分 + 30% 盤中動能分。")
+                st.caption("原始「決策」保留盤後模型結論；「行動」只是盤中首頁的使用者語言翻譯。盤中 AI = 70% 最近盤後買進分 + 30% 盤中動能分。「反應分」是昨晚盤後就用單股回測同一套公式算好的找飆股訊號，盤中不會重算。")
 
             st.markdown("### ⚡ 盤中起漲雷達")
             radar_mode_used = st.session_state.get("intraday_scan_mode", DEFAULT_MODE)
-            st.caption(f"目前門檻：{radar_mode_used} 模式。爆量突破分／分時動能分／VWAP強弱／突破20日高／主力買盤強度（代理指標）綜合成「起漲雷達分」。")
+            st.caption(f"目前門檻：{radar_mode_used} 模式。反應分（昨晚盤後算好，與單股回測同公式）／爆量突破分／分時動能分／VWAP強弱／突破20日高／主力買盤強度（代理指標）綜合成「起漲雷達分」。")
             if "起漲雷達分" in live.columns:
                 radar_view = live.sort_values("起漲雷達分", ascending=False)
                 radar_signal_only = st.checkbox("只看有訊號的股票（🟢起漲訊號／🟡醞釀中）", value=True, key="radar_signal_only")
@@ -3371,16 +3514,17 @@ with tab_intraday:
                     radar_view = radar_view[radar_view["雷達訊號"] != "⚪ 不明顯"]
                 radar_cols = [c for c in [
                     "股票代碼", "名稱", "即時價", "即時漲跌%", "起漲雷達分", "雷達訊號",
-                    "爆量突破分", "分時動能分", "VWAP強弱", "突破20日高", "主力買盤強度"
+                    "反應分", "找飆股訊號", "爆量突破分", "分時動能分", "VWAP強弱", "突破20日高", "主力買盤強度"
                 ] if c in radar_view.columns]
                 st.dataframe(
                     radar_view[radar_cols].head(30), use_container_width=True, hide_index=True,
                     column_config={
                         "起漲雷達分": st.column_config.ProgressColumn("起漲雷達分", min_value=0, max_value=100, format="%.0f"),
                         "即時漲跌%": st.column_config.NumberColumn("即時漲跌%", format="%.2f%%"),
+                        "反應分": st.column_config.ProgressColumn("反應分", min_value=0, max_value=100, format="%.0f"),
                     },
                 )
-                st.caption("盤中快照沒有分時明細與真實委託單資料，VWAP強弱、主力買盤強度是在此限制下的合理代理指標，不是交易所原始委買賣數據；僅供研究排序，不是進場保證。")
+                st.caption("盤中快照沒有分時明細與真實委託單資料，VWAP強弱、主力買盤強度是在此限制下的合理代理指標，不是交易所原始委買賣數據；「反應分」則是真實日K算出來的，可信度較高；僅供研究排序，不是進場保證。")
         else:
             st.info("尚未執行盤中掃描。按上方「🔍 掃描今日盤中機會」即可。")
 
@@ -3420,9 +3564,9 @@ with tab_eod:
         with c2:
             strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1)
         with c3:
-            eod_mode_choice = st.radio("🌙 盤後策略模式", ["⚖ 平衡", "🚀 積極"], horizontal=True, index=0,
-                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：平衡門檻較高、訊號較少較嚴謹；積極門檻最低、訊號最多也最容易誤觸。")
-        eod_mode = {"⚖ 平衡": "平衡", "🚀 積極": "積極"}.get(eod_mode_choice, DEFAULT_MODE)
+            eod_mode_choice = st.radio("🌙 盤後策略模式", ["⚖ 穩健", "🚀 找飆股"], horizontal=True, index=0,
+                                        help="只調整「買進/觀察」門檻與空頭折扣，不改變分數計算方式：穩健門檻較高、訊號較少較嚴謹；找飆股門檻最低、訊號最多也最容易誤觸。")
+        eod_mode = {"⚖ 穩健": "平衡", "🚀 找飆股": "積極"}.get(eod_mode_choice, DEFAULT_MODE)
         st.session_state["eod_mode"] = eod_mode
 
         if market_choice == "🏛️ 僅上市": uni = universe_df[universe_df["type"].str.lower() == "twse"]
@@ -3474,6 +3618,17 @@ with tab_eod:
                         batch_sources = prepare_pit_sources_batch(shortlist, 1500)
                         final_status.update(label="🧠 批次研究資料完成… 5/5")
                     _flush_api_errors()
+
+                    # V11.2：找飆股候選——沿用剛抓好的 batch_sources（0 額外 API 額度），
+                    # 用單股回測同一套 same_day_reaction_score 算出「明日開盤候選名單」，
+                    # 存成獨立快取，隔天盤中掃描直接讀，不必也不會重算。
+                    try:
+                        hot_out = run_hot_stock_scan(batch_sources, universe_df, mode=eod_mode)
+                        save_hot_stock_scan(hot_out, mode=eod_mode)
+                        st.session_state["hot_stock_out"] = hot_out
+                        st.session_state["hot_stock_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as exc:
+                        _log_api_error("run_hot_stock_scan", "-", exc)
 
                     with st.status(f"🧠 完整分析中… 0/{len(shortlist)}", expanded=False) as final_status:
                         for done, sid in enumerate(shortlist, start=1):
@@ -3529,6 +3684,21 @@ with tab_eod:
                 st.subheader("🔥 明日最值得看")
                 for rank, (_, row) in enumerate(top5_df.iterrows(), start=1):
                     render_pick_card(row, rank)
+
+            hot_df = st.session_state.get("hot_stock_out")
+            if isinstance(hot_df, pd.DataFrame) and not hot_df.empty:
+                hot_hits = hot_df[hot_df["找飆股訊號"] == "🚀 找飆股訊號"].head(10)
+                with st.expander(f"🚀 找飆股候選（明日開盤參考，共 {len(hot_hits)} 檔達標）", expanded=len(hot_hits) > 0):
+                    st.caption("跟深度研究的「買進分」是兩套獨立訊號：這裡只看昨天自己的跳空幅度、爆量倍數、收盤位置，"
+                               "算得快、也是單股回測「盤中」模式用的同一套公式，但沒有基本面/估值把關，訊號更快也更容易誤觸，僅供快速掃視、不是正式買進訊號。")
+                    if hot_hits.empty:
+                        st.info("目前沒有股票達到找飆股門檻；可到「⚙️ 系統設定」或本頁「🚀 找飆股」模式降低門檻看看醞釀中的股票。")
+                    else:
+                        hot_cols = [c for c in ["排名", "股票代碼", "名稱", "反應分", "找飆股訊號", "跳空%", "量比", "收盤位置%", "反應訊號日"] if c in hot_hits.columns]
+                        st.dataframe(
+                            hot_hits[hot_cols], use_container_width=True, hide_index=True,
+                            column_config={"反應分": st.column_config.ProgressColumn("反應分", min_value=0, max_value=100, format="%.0f")},
+                        )
 
             st.subheader("📋 盤後深度結果")
             st.caption("先看「買進分」判斷條件強度，再看「風險／資料品質／風險調整優先級」決定研究順序；不要把買進分直接當成勝率。")
@@ -4053,8 +4223,9 @@ with tab_advanced:
         with sc3:
             single_end = st.date_input("結束日期", value=datetime.now().date(), key="single_bt_end")
         single_scan_mode = "盤中"
-        single_mode = st.radio("進場積極程度", ["平衡", "積極"], horizontal=True, index=0, key="single_bt_mode",
-                                help="平衡：訊號門檻較高，抓得比較準但比較慢。積極：門檻更低，抓得更快更早，但也更容易誤觸假訊號。")
+        single_mode_choice = st.radio("進場積極程度", ["⚖ 穩健", "🚀 找飆股"], horizontal=True, index=0, key="single_bt_mode",
+                                       help="穩健：訊號門檻較高，抓得比較準但比較慢。找飆股：門檻更低，抓得更快更早，但也更容易誤觸假訊號。")
+        single_mode = {"⚖ 穩健": "平衡", "🚀 找飆股": "積極"}.get(single_mode_choice, DEFAULT_MODE)
         if single_stock_input and st.button("▶️ 執行單股回測", type="primary"):
             with st.status(f"📉 {single_stock_input}（{single_mode}）Point-in-Time 回測中…", expanded=False):
                 st.session_state["single_backtest_res"] = backtest_single(
