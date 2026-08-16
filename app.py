@@ -254,10 +254,24 @@ def save_hot_stock_scan(df, mode=None):
         return False
 
 
+def _migrate_legacy_hot_signal_labels(df):
+    """V11.2 命名調整：「🚀 找飆股訊號」改名成「🔥 反應強訊號」，避免跟「🚀 積極模式」撞名。
+    如果本機還留著改名前存的舊快取檔，這裡把舊字串轉成新字串，讓使用者不用手動清快取、
+    也不用重跑一次盤後深度掃描，畫面就能立刻顯示新名稱。
+    """
+    if isinstance(df, pd.DataFrame) and "找飆股訊號" in df.columns:
+        df = df.copy()
+        df["找飆股訊號"] = df["找飆股訊號"].replace({"🚀 找飆股訊號": "🔥 反應強訊號"})
+    return df
+
+
 def load_hot_stock_scan():
     try:
         if HOT_STOCK_CACHE_FILE.exists():
-            return pd.read_pickle(HOT_STOCK_CACHE_FILE)
+            payload = pd.read_pickle(HOT_STOCK_CACHE_FILE)
+            if isinstance(payload, dict) and isinstance(payload.get("out"), pd.DataFrame):
+                payload["out"] = _migrate_legacy_hot_signal_labels(payload["out"])
+            return payload
     except Exception:
         pass
     return None
@@ -711,6 +725,14 @@ st.markdown("""
     .price-target-box .pt-label { font-size: 11px; color: var(--text-sub); font-weight:600; }
     .price-target-box .pt-value { font-size: 15px; font-weight: 700; margin-top: 2px; }
 
+    .price-plan-box { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg-main); border: 1px solid var(--border-c); }
+    .price-plan-title { font-size: 12.5px; font-weight: 700; color: var(--text-sub); margin-bottom: 6px; }
+    .price-plan-row { display:grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .price-plan-item { padding: 6px 8px; border-radius: 8px; background: var(--bg-card, transparent); border: 1px solid var(--border-c); }
+    .price-plan-item .pp-label { font-size: 11px; color: var(--text-sub); font-weight:600; }
+    .price-plan-item .pp-value { font-size: 15px; font-weight: 700; margin-top: 2px; }
+    .price-plan-note { font-size: 11.5px; color: var(--text-sub); margin-top: 8px; line-height: 1.6; }
+
     .holding-card ul.hc-reasons { margin: 12px 0 0 0; padding: 0 0 0 18px; font-size: 13.5px; color: var(--text-sub); line-height: 1.7; }
 
     /* =========================
@@ -819,7 +841,7 @@ st.markdown("""
         .market-overview { grid-template-columns:repeat(3,1fr); }
     }
     @media (max-width: 900px) {
-        .risk-profile-grid, .stat-chip-row, .price-target-row { grid-template-columns: 1fr 1fr; }
+        .risk-profile-grid, .stat-chip-row, .price-target-row, .price-plan-row { grid-template-columns: 1fr 1fr; }
         .market-overview, .scanner-launch-grid { grid-template-columns:1fr 1fr; }
         .terminal-header { align-items:flex-start; flex-direction:column; }
     }
@@ -1801,7 +1823,8 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
     if isinstance(saved, dict) and isinstance(saved.get("out"), pd.DataFrame) and not saved["out"].empty:
         keep = [c for c in [
             "股票代碼", "買進分", "優先級", "風險", "狀態", "決策", "資料品質",
-            "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "趨勢", "說明", "理由", "起漲分", "量比"
+            "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "趨勢", "說明", "理由", "起漲分", "量比",
+            "ATR", "RSI", "ADX", "daily",  # 進出場價參考（suggest_price_plan）要用；已經在盤後掃描存好，0 額外 API
         ] if c in saved["out"].columns]
         base = saved["out"][keep].drop_duplicates("股票代碼")
         out = out.merge(base, on="股票代碼", how="left")
@@ -2635,6 +2658,37 @@ def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_pro
     }
 
 
+def suggest_price_plan(stock_row, stop_loss_pct=10.0):
+    """給還沒買進的人看的「進出場價參考」：假設現在用市價買進，AI 建議的初始停損、
+    目標價1／目標價2 會是多少。
+
+    刻意不另外發明新公式——直接借用「庫存健康」的 evaluate_holding_action()：
+    把「持有成本」設成「現在的價格」，等於模擬『現在剛買進』這件事，這樣同一檔股票
+    不管是盤中掃描看到、還是之後放進庫存健康追蹤，算出來的停損／目標價邏輯永遠一致，
+    不會有「兩套價格」互相打架的問題。
+
+    這是量化規則算出來的參考值，不是報價系統的委託單，也不是保證停利／停損一定成交
+    在這個價位；真正下單時還是要看當下的市價與委託簿。
+    """
+    price = safe_float(stock_row.get("現價"))
+    if pd.isna(price):
+        price = safe_float(stock_row.get("即時價"))
+    if pd.isna(price) or price <= 0:
+        return None
+    # evaluate_holding_action 內部固定讀 stock_row 的「現價」欄位；盤中掃描的資料
+    # 用的欄位名是「即時價」，這裡統一補上「現價」，確保兩邊算出來的價位一致。
+    row_for_calc = dict(stock_row) if isinstance(stock_row, dict) else stock_row.to_dict()
+    row_for_calc["現價"] = price
+    plan = evaluate_holding_action(row_for_calc, cost=price, shares=0, stop_loss_pct=stop_loss_pct)
+    return {
+        "參考進場價": price,
+        "AI建議停損價": plan.get("建議停損價"),
+        "目標價1": plan.get("目標價1"),
+        "目標價2": plan.get("目標價2"),
+        "趨勢係數": plan.get("趨勢係數"),
+    }
+
+
 # =========================
 # 7. 回測引擎：統一買進分 + 真實成本 + 完整績效
 # =========================
@@ -3275,6 +3329,32 @@ hold_days = st.session_state["cfg_hold_days"]
 scan_workers = st.session_state["cfg_scan_workers"]
 
 
+def render_price_plan_html(plan):
+    """把『如果現在買，進出場價抓多少』畫成一個小方塊。plan 來自 suggest_price_plan()。"""
+    if not plan:
+        return ""
+    entry = plan.get("參考進場價", np.nan)
+    stop_v = plan.get("AI建議停損價", np.nan)
+    t1 = plan.get("目標價1", np.nan)
+    t2 = plan.get("目標價2", np.nan)
+
+    def _fmt(v):
+        return f"{v:.2f}" if (v is not None and not pd.isna(v)) else "—"
+
+    return f"""
+<div class="price-plan-box">
+    <div class="price-plan-title">💰 如果現在買，這樣抓進出場價（AI 參考，非委託單）</div>
+    <div class="price-plan-row">
+        <div class="price-plan-item"><div class="pp-label">參考進場價</div><div class="pp-value">{_fmt(entry)}</div></div>
+        <div class="price-plan-item"><div class="pp-label">🛑 建議停損價</div><div class="pp-value" style="color:var(--accent-red);">{_fmt(stop_v)}</div></div>
+        <div class="price-plan-item"><div class="pp-label">🎯 目標價1</div><div class="pp-value" style="color:var(--accent-green);">{_fmt(t1)}</div></div>
+        <div class="price-plan-item"><div class="pp-label">🎯 目標價2</div><div class="pp-value" style="color:var(--accent-green);">{_fmt(t2)}</div></div>
+    </div>
+    <div class="price-plan-note">操作參考：接近或跌破停損價就出場保本；到目標價1先賣一部分、到目標價2再賣一部分，剩下的用停損價顧著就好，不用一次全賣。這組價格會隨這檔股票自己的波動度（ATR）自動變動，不是固定百分比，之後只要在「🩺 庫存健康」輸入你實際成交的價格，就能接著追蹤同一套停損／停利。</div>
+</div>
+"""
+
+
 def render_pick_card(row, rank=None):
     prefix = f"{rank}. " if rank else ""
     name = row.get("名稱", "") or ""
@@ -3290,6 +3370,11 @@ def render_pick_card(row, rank=None):
         <div class="pick-reason">{reasons_html}</div>
     </div>
     """, unsafe_allow_html=True)
+    plan = suggest_price_plan(row)
+    if plan:
+        st.markdown(render_price_plan_html(plan), unsafe_allow_html=True)
+
+
 
 
 def scan_column_config():
@@ -3479,6 +3564,12 @@ with tab_intraday:
                         st.success("盤後模型已達正式進場門檻；仍請搭配風險與盤中狀態判斷，不把分數視為報酬保證。")
                     if "🔥 反應強訊號" in str(hot_signal) and "🟢 可買" not in str(formal_decision):
                         st.warning("👀 這檔股票出現「🔥 搶先關注」標籤，代表昨天跳空／爆量／收在高點的反應很強，AI 覺得值得先注意——但還沒有通過完整的正式買進條件檢查。建議做法：先觀察、先加進你的關注清單，不要因為看到這個標籤就急著買，等它也拿到「🟢 可買」再考慮進場，會比較穩。")
+
+                    plan = suggest_price_plan(r)
+                    if plan:
+                        st.markdown(render_price_plan_html(plan), unsafe_allow_html=True)
+                    else:
+                        st.caption("目前資料不足以算出進出場價參考（缺 ATR／波動度資料），建議先到「🔍 股票分析」查一次這檔股票。")
 
             st.markdown("### 📋 一般模式")
             simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "盤中 AI", "行動", "風險"] if c in live.columns]
