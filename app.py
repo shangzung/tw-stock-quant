@@ -1044,7 +1044,7 @@ STRATEGY_MODES = {
     "積極": {
         "eod_buy_threshold": 78, "eod_watch_threshold": 55, "overheat_penalty": 10,
         "bear_mult": 0.70, "hold_days": 7, "stop_atr": 2.5, "target_atr": 4.0,
-        "radar_threshold": 55, "radar_watch": 42, "reaction_threshold": 45,
+        "radar_threshold": 55, "radar_watch": 42, "reaction_threshold": 32,
         "desc": "門檻最低、進場最早，訊號最多，也最容易誤觸假訊號。",
     },
 }
@@ -1569,10 +1569,12 @@ def same_day_reaction_score(row, prev_close, avg_vol20):
     if gap_pct >= 3: score += 30
     elif gap_pct >= 1: score += 18
     elif gap_pct > 0: score += 8
+    elif gap_pct > -1: score += 3
 
     if vol_mult >= 3: score += 35
     elif vol_mult >= 2: score += 25
-    elif vol_mult >= 1.5: score += 12
+    elif vol_mult >= 1.5: score += 15
+    elif vol_mult >= 1.2: score += 8
 
     score += clamp(close_pos, 0, 1) * 35
     return clamp(score)
@@ -4024,7 +4026,7 @@ with tab_advanced:
 
     with sub_single:
         st.subheader("📉 單股研究級回測")
-        st.caption("輸入股票代碼＋起訖日期＋想測試的掃描模式與策略，直接看該組合在這段區間會不會抓到訊號、什麼時候進場。")
+        st.caption("輸入股票代碼＋起訖日期＋想測試的積極程度，直接看這段區間會不會抓到訊號、什麼時候進場。進場判斷固定用『當日反應』引擎（跳空＋爆量＋收盤位置），抓訊號比較快。")
         sc1, sc2, sc3 = st.columns([1.2, 1, 1])
         with sc1:
             single_stock_input = st.text_input("股票", value=(stocks[0] if stocks else "5351"), key="single_bt_stock").strip()
@@ -4032,15 +4034,13 @@ with tab_advanced:
             single_start = st.date_input("開始日期", value=(datetime.now() - timedelta(days=90)).date(), key="single_bt_start")
         with sc3:
             single_end = st.date_input("結束日期", value=datetime.now().date(), key="single_bt_end")
-        sc4, sc5 = st.columns(2)
-        with sc4:
-            single_scan_mode = st.radio("掃描模式", ["盤中", "盤後"], horizontal=True, key="single_bt_scanmode",
-                                         help="盤中：用前一日自己的跳空／爆量／收盤位置算出的當日反應分，當天開盤即進場，抓訊號較早。盤後：用當日收盤確認的買進分，隔一交易日開盤才進場，較嚴謹。")
-        with sc5:
-            single_mode = st.radio("策略", ["平衡", "積極"], horizontal=True, index=0, key="single_bt_mode")
+        single_scan_mode = "盤中"
+        single_mode = st.radio("進場積極程度", ["平衡", "積極"], horizontal=True, index=0, key="single_bt_mode",
+                                help="平衡：訊號門檻較高，抓得比較準但比較慢。積極：門檻更低，抓得更快更早，但也更容易誤觸假訊號。")
         if single_stock_input and st.button("▶️ 執行單股回測", type="primary"):
-            with st.status(f"📉 {single_stock_input}（{single_scan_mode}・{single_mode}）Point-in-Time 回測中…", expanded=False):
+            with st.status(f"📉 {single_stock_input}（{single_mode}）Point-in-Time 回測中…", expanded=False):
                 st.session_state["single_backtest_res"] = backtest_single(
+
                     single_stock_input, initial_capital, fee, tax, slippage,
                     start_date=single_start, end_date=single_end, mode=single_mode, scan_mode=single_scan_mode)
         result=st.session_state.get("single_backtest_res")
