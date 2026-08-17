@@ -1116,6 +1116,24 @@ INTRADAY_TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 INTRADAY_SCAN_CACHE_FILE = CACHE_DIR / "intraday_scan.pkl"
 EOD_SCAN_CACHE_FILE = CACHE_DIR / "eod_scan.pkl"
 
+
+def is_tw_market_hours():
+    """簡單判斷『現在』是否落在台股交易時段（09:00–13:30，週一至週五）。
+    只用來在畫面上提示使用者「為什麼盤中掃描結果沒有變化」，不影響任何抓取或評分邏輯；
+    抓不到時區資料時安全地回傳 True（不主動顯示提示），避免因為環境沒有 tzdata 而誤判。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import time as _dtime
+        now = datetime.now(ZoneInfo("Asia/Taipei"))
+    except Exception:
+        return True
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return _dtime(9, 0) <= t <= _dtime(13, 30)
+
+
 if "api_errors" not in st.session_state:
     st.session_state["api_errors"] = []
 
@@ -3326,7 +3344,7 @@ with tab_help:
         <div class="help-body">
           按「⚡ 盤中即時」→「一鍵掃描現在市場」。盤中主要看即時行情、成交量、漲跌與動能，並套用昨晚留下的研究結果。
           它的目的不是重新做一遍財報研究，而是回答：<b>「昨晚看好的股票，今天市場真的有沒有在買？」</b>
-          盤中模式原則上不重新打完整 FinMind 研究資料，所以可以比盤後更頻繁使用。
+          盤中模式原則上不重新打完整 FinMind 研究資料，所以可以比盤後更頻繁使用。<b>只有在真正的交易時段（09:00–13:30，週一至週五）內，這個「有沒有在買」才有新的市場資料可以回答；非交易時段按掃描，抓到的會是最近一個交易日的收盤總結，重複按也不會變化。</b>
         </div>
       </div>
 
@@ -3530,7 +3548,24 @@ with tab_intraday:
                                          help="只調整「起漲訊號」的雷達分門檻，不會幫你自動下單：穩健＝門檻較高、訊號較少但較嚴謹；積極模式＝門檻最低、進場最早，但也最容易誤觸假訊號，適合願意多花時間篩選的人。")
         intraday_mode = {"⚖ 穩健": "平衡", "🚀 積極模式": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
 
-        if st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True):
+        if not is_tw_market_hours():
+            st.caption("⏰ 目前不是台股交易時段（09:00–13:30，週一至週五）。交易所這時候回傳的是「最近一個交易日」的收盤總結，內容不會隨時間改變——所以重複按掃描、轉完圈圈後結果跟之前一樣，是正常現象，不是按鈕壞了。開盤後再測，數字才會持續變動。")
+
+        scan_col1, scan_col2 = st.columns([3, 1.5])
+        with scan_col1:
+            do_scan = st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True)
+        with scan_col2:
+            force_refresh = st.button("🔄 強制重抓（略過快取）", use_container_width=True,
+                                       help="平常按左邊「掃描」就好。如果你連續按了好幾次，畫面內容都長得一模一樣，"
+                                            "按這顆會直接跳過內部 15 秒快取，強制重新連線交易所抓一次最新資料，"
+                                            "方便你確認到底是資料真的沒變、還是程式沒有重新抓取。")
+
+        if do_scan or force_refresh:
+            if force_refresh:
+                try:
+                    get_intraday_market_snapshot.clear()
+                except Exception:
+                    pass
             with st.spinner("連線交易所並掃描市場中…"):
                 try:
                     live = run_intraday_scan(u, top_n=30, mode=intraday_mode)
@@ -3538,6 +3573,16 @@ with tab_intraday:
                     st.session_state["intraday_scan_out"] = live
                     st.session_state["intraday_scan_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     st.session_state["intraday_scan_mode"] = intraday_mode
+                    if isinstance(live, pd.DataFrame) and not live.empty and "即時漲跌%" in live.columns:
+                        _avg_pct = safe_float(pd.to_numeric(live["即時漲跌%"], errors="coerce").mean())
+                        _avg_txt = f"{_avg_pct:+.2f}%" if not pd.isna(_avg_pct) else "—"
+                        st.session_state["intraday_scan_debug"] = (
+                            f"本次共 {len(live)} 檔通過成交金額門檻，平均即時漲跌 {_avg_txt}。"
+                            f"若這個數字連續幾次完全一樣，代表交易所這段時間沒有新的成交資料（例如非交易時段），"
+                            f"不是程式沒有重新抓取。"
+                        )
+                    else:
+                        st.session_state["intraday_scan_debug"] = "本次掃描沒有股票通過成交金額門檻（可能是非交易時段、市場尚無成交）。"
                     st.rerun()
                 except Exception as exc:
                     _log_api_error("run_intraday_scan", "-", exc)
@@ -3554,6 +3599,8 @@ with tab_intraday:
             saved_at = st.session_state.get("intraday_scan_saved_at", "")
             if saved_at:
                 st.caption(f"🕒 最近一次盤中掃描：{saved_at} · 盤後研究：{eod_time}")
+            if st.session_state.get("intraday_scan_debug"):
+                st.caption(f"🔬 診斷：{st.session_state['intraday_scan_debug']}")
 
             top3 = live.head(3).copy()
             st.markdown("### 🔥 今日值得關注")
