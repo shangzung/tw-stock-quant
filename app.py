@@ -1602,8 +1602,127 @@ def _normalize_intraday_frame(df, source):
     out["來源"] = source
     return out.reset_index(drop=True)
 
-@st.cache_data(ttl=INTRADAY_CACHE_TTL, show_spinner=False)
-def get_intraday_market_snapshot():
+# =========================
+# V12.0 修正：盤中即時快照改走 MIS 真即時來源
+# 舊版直接打 TWSE「afterTrading/MI_INDEX」，這支路徑名稱雖然叫 afterTrading，
+# 但實際內容是『每日收盤行情』——當天的檔案要收盤後才會產生，開盤當下呼叫它，
+# 交易所回傳的其實是『最近一個已結算交易日』（通常就是昨天）的資料，並不會因為
+# 你重新整理或清快取而改變。這正是「開盤按盤中掃描還是舊資料」的根本原因，
+# 不是 Streamlit 快取沒清乾淨（強制重抓其實一直都有正確清掉 15 秒快取）。
+#
+# 改用 TWSE 自己「基本市況報導」網站在用的 MIS 即時報價 API
+# （mis.twse.com.tw/stock/api/getStockInfo.jsp），同時涵蓋上市（tse_）與
+# 上櫃（otc_），約 5 秒更新一次、免費、不用 Token、不吃 FinMind 額度。
+# 交易所整批快照真的完全失敗時（例如網路環境擋掉 mis.twse.com.tw），
+# 才會退回舊的『每日收盤行情』當備援，並把來源標成 *_EOD_FALLBACK，
+# 讓下面的診斷文字可以提醒使用者「這次其實不是即時資料」。
+# =========================
+MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+MIS_WARMUP_URL = "https://mis.twse.com.tw/stock/index.jsp"
+MIS_BATCH_SIZE = 100
+
+
+def _mis_prefix(market_type):
+    return "otc" if str(market_type).strip().lower() == "tpex" else "tse"
+
+
+def _mis_warm_session():
+    """MIS 沒有先建立 session cookie 常常會被視為異常連線、拿不到資料，
+    所以先打一次首頁熱身，拿到 cookie 後才開始真正查詢。"""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://mis.twse.com.tw/stock/index.jsp",
+        "Accept": "application/json",
+    })
+    try:
+        s.get(MIS_WARMUP_URL, timeout=8)
+    except Exception:
+        pass
+    return s
+
+
+def _fetch_mis_batch(session, ex_ch_codes):
+    try:
+        r = session.get(
+            MIS_STOCK_INFO_URL,
+            params={
+                "ex_ch": "|".join(ex_ch_codes),
+                "json": "1",
+                "delay": "0",
+                "_": str(int(time.time() * 1000)),
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        return payload.get("msgArray", []) if isinstance(payload, dict) else []
+    except Exception as e:
+        _log_api_error("MIS getStockInfo", ex_ch_codes[0] if ex_ch_codes else "-", e)
+        return []
+
+
+def _get_intraday_snapshot_via_mis():
+    """主要來源：MIS 即時報價（真正的盤中資料，非收盤後才產生的報表）。"""
+    uni = get_stock_universe()
+    if uni is None or uni.empty or "stock_id" not in uni.columns:
+        return pd.DataFrame()
+    codes = uni[["stock_id"] + (["type"] if "type" in uni.columns else [])].dropna(subset=["stock_id"]).copy()
+    if "type" not in codes.columns:
+        codes["type"] = "twse"
+    codes["ex_ch"] = codes["type"].map(_mis_prefix) + "_" + codes["stock_id"].astype(str) + ".tw"
+    ex_ch_all = codes["ex_ch"].tolist()
+    if not ex_ch_all:
+        return pd.DataFrame()
+
+    session = _mis_warm_session()
+    rows = []
+    for i in range(0, len(ex_ch_all), MIS_BATCH_SIZE):
+        rows.extend(_fetch_mis_batch(session, ex_ch_all[i:i + MIS_BATCH_SIZE]))
+        time.sleep(0.03)  # 對交易所客氣一點，避免短時間內大量連續請求被判定異常
+    if not rows:
+        return pd.DataFrame()
+
+    raw = pd.DataFrame(rows)
+    if raw.empty or "c" not in raw.columns:
+        return pd.DataFrame()
+
+    out = pd.DataFrame({"股票代碼": raw["c"].astype(str).str.strip()})
+    out = out[out["股票代碼"].str.match(r"^\d{4}$", na=False)].copy()
+    if out.empty:
+        return out
+    raw = raw.loc[out.index]
+    if "n" in raw.columns:
+        out["名稱"] = raw["n"].astype(str).values
+
+    price = pd.to_numeric(raw.get("z"), errors="coerce")
+    prev_close = pd.to_numeric(raw.get("y"), errors="coerce")
+    # 開盤前／盤中零星無成交的股票，z 常是 "-"（無法轉成數字），先退回昨收價，
+    # 至少不會讓整檔股票從清單裡消失；等真的有成交，下一輪 15 秒快取就會更新。
+    price = price.fillna(prev_close)
+
+    vol_lots = pd.to_numeric(raw.get("v"), errors="coerce").fillna(0)  # 累積成交量，單位：張
+    out["即時價"] = price.values
+    out["漲跌"] = (price - prev_close).round(2).values
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pct = np.where(prev_close.values > 0, (price.values - prev_close.values) / prev_close.values * 100, np.nan)
+    out["即時漲跌%"] = np.round(pct, 2)
+    out["成交量"] = (vol_lots * 1000).values  # 張 -> 股，跟舊版欄位單位一致
+    # MIS 沒有直接給『成交金額』欄位，用「即時價 × 累積成交量」估算（跟其他多數台股
+    # 看盤工具的做法一致），量能分級門檻本來就是概估用途，這個估算不影響排序邏輯。
+    out["成交金額"] = (price.values * out["成交量"].values).round(0)
+    if "d" in raw.columns:
+        out["資料日期"] = raw["d"].astype(str).values
+    out["來源"] = "MIS"
+    out = out.dropna(subset=["即時價"]).drop_duplicates("股票代碼", keep="first").reset_index(drop=True)
+    return out
+
+
+def _get_intraday_snapshot_via_exchange_eod():
+    """備援來源：只有 MIS 整批失敗（例如網路環境擋掉 mis.twse.com.tw）才會走到這裡。
+    這裡打的仍是交易所『每日收盤行情』，開盤中可能還是最近一個已結算交易日的資料，
+    不保證即時，所以來源標成 *_EOD_FALLBACK，讓 UI 可以提醒使用者這次不是即時資料。
+    """
     frames = []
     try:
         r = requests.get(INTRADAY_TWSE_URL, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
@@ -1614,23 +1733,35 @@ def get_intraday_market_snapshot():
             fields, data = table.get("fields"), table.get("data")
             if fields and data:
                 fdf = pd.DataFrame(data, columns=fields)
-                n = _normalize_intraday_frame(fdf, "TWSE")
+                n = _normalize_intraday_frame(fdf, "TWSE_EOD_FALLBACK")
                 if not n.empty: frames.append(n)
     except Exception as e:
-        _log_api_error("TWSE intraday snapshot", "-", e)
+        _log_api_error("TWSE intraday snapshot (fallback)", "-", e)
     try:
         r = requests.get(INTRADAY_TPEX_URL, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         payload = r.json()
         tdf = pd.DataFrame(payload if isinstance(payload, list) else payload.get("data", []))
-        n = _normalize_intraday_frame(tdf, "TPEx")
+        n = _normalize_intraday_frame(tdf, "TPEx_EOD_FALLBACK")
         if not n.empty: frames.append(n)
     except Exception as e:
-        _log_api_error("TPEx intraday snapshot", "-", e)
+        _log_api_error("TPEx intraday snapshot (fallback)", "-", e)
     if not frames:
-        raise ValueError("交易所盤中快照無有效資料")
+        raise ValueError("交易所盤中快照（含備援）皆無有效資料")
     out = pd.concat(frames, ignore_index=True)
     out = out.drop_duplicates("股票代碼", keep="first")
+    for c in ["即時價", "漲跌", "即時漲跌%", "成交量", "成交金額"]:
+        if c not in out: out[c] = np.nan
+    return out
+
+
+@st.cache_data(ttl=INTRADAY_CACHE_TTL, show_spinner=False)
+def get_intraday_market_snapshot():
+    out = _get_intraday_snapshot_via_mis()
+    if out is None or out.empty:
+        out = _get_intraday_snapshot_via_exchange_eod()
+    if out is None or out.empty:
+        raise ValueError("交易所盤中快照無有效資料")
     for c in ["即時價", "漲跌", "即時漲跌%", "成交量", "成交金額"]:
         if c not in out: out[c] = np.nan
     return out
@@ -3581,6 +3712,15 @@ with tab_intraday:
                             f"若這個數字連續幾次完全一樣，代表交易所這段時間沒有新的成交資料（例如非交易時段），"
                             f"不是程式沒有重新抓取。"
                         )
+                        # 只有在 MIS 真即時來源整批失敗、退回舊版『每日收盤行情』備援時才會出現，
+                        # 明確提醒使用者這一次抓到的不是即時資料。
+                        if "來源" in live.columns and live["來源"].astype(str).str.contains("EOD_FALLBACK", na=False).any():
+                            st.session_state["intraday_scan_fallback_warning"] = (
+                                "⚠️ 這次即時報價來源（MIS）連線失敗，已自動退回交易所『每日收盤行情』備援，"
+                                "畫面上的價格可能不是這一刻的即時價，建議稍後按「強制重抓」再試一次。"
+                            )
+                        else:
+                            st.session_state["intraday_scan_fallback_warning"] = None
                     else:
                         st.session_state["intraday_scan_debug"] = "本次掃描沒有股票通過成交金額門檻（可能是非交易時段、市場尚無成交）。"
                     st.rerun()
@@ -3601,6 +3741,8 @@ with tab_intraday:
                 st.caption(f"🕒 最近一次盤中掃描：{saved_at} · 盤後研究：{eod_time}")
             if st.session_state.get("intraday_scan_debug"):
                 st.caption(f"🔬 診斷：{st.session_state['intraday_scan_debug']}")
+            if st.session_state.get("intraday_scan_fallback_warning"):
+                st.warning(st.session_state["intraday_scan_fallback_warning"])
 
             top3 = live.head(3).copy()
             st.markdown("### 🔥 今日值得關注")
