@@ -1843,11 +1843,31 @@ def _get_intraday_snapshot_via_mis():
     if "n" in raw.columns:
         out["名稱"] = raw["n"].astype(str).values
 
-    price = pd.to_numeric(raw.get("z"), errors="coerce")
+    # V12.4 修正：pd.to_numeric 對 MIS 的「z」欄位太嚴格。z 正常應該是單一價格字串，
+    # 但實務上看過帶結尾底線、或極少數情況黏了不只一段數字（例如 "123.50_"）的髒格式，
+    # 這種字串 pd.to_numeric 會直接判成 NaN，導致「明明今天有成交」卻被誤判成「沒有成交」，
+    # 掉進下面的『退回昨收』分支——這正是之前鈺創(5351)這類重跌股，畫面上顯示的其實是
+    # 昨收價、卻配了一個很新的成交時間，讓人誤以為那是即時價的成因。改成先嘗試寬鬆解析
+    # （去掉底線、逗號後取第一段可轉換的數字），只有真的解析不出任何數字才視為「無成交」。
+    def _mis_parse_price(v):
+        if v is None:
+            return np.nan
+        s = str(v).strip()
+        if not s or s == "-":
+            return np.nan
+        s = s.replace(",", "")
+        first_token = s.split("_")[0].strip()
+        try:
+            return float(first_token)
+        except (ValueError, TypeError):
+            return np.nan
+
+    price_live = raw.get("z").map(_mis_parse_price) if "z" in raw.columns else pd.Series(np.nan, index=raw.index)
     prev_close = pd.to_numeric(raw.get("y"), errors="coerce")
-    # 開盤前／盤中零星無成交的股票，z 常是 "-"（無法轉成數字），先退回昨收價，
-    # 至少不會讓整檔股票從清單裡消失；等真的有成交，下一輪 15 秒快取就會更新。
-    price = price.fillna(prev_close)
+    # 只有寬鬆解析後仍然拿不到任何數字（真的沒有成交，例如開盤前、冷門股盤中掛零），
+    # 才退回昨收價，至少不會讓整檔股票從清單裡消失；等真的有成交，下一輪 15 秒快取就會更新。
+    used_prev_close_fallback = price_live.isna() & prev_close.notna()
+    price = price_live.fillna(prev_close)
 
     vol_lots = pd.to_numeric(raw.get("v"), errors="coerce").fillna(0)  # 累積成交量，單位：張
     out["即時價"] = price.values
@@ -1865,7 +1885,13 @@ def _get_intraday_snapshot_via_mis():
         # MIS 回傳的「t」是這筆報價本身的成交時間（HH:MM:SS），是判斷「這個價格到底新不新」
         # 最可靠的依據——比「我們幾點鐘呼叫 API」更準，因為冷門股本來就可能好幾分鐘沒成交，
         # 這種情況下 t 停在原地是正常現象，不代表程式沒有重新抓取。
-        out["報價時間"] = raw["t"].astype(str).values
+        # 但如果這一列的「即時價」其實是退回昨收（used_prev_close_fallback=True），t 就不能照抄，
+        # 否則會出現「價格是昨收、時間卻是剛剛」這種誤導畫面；這種列的報價時間留白，
+        # 讓下游既有的「此股目前無成交時間資料，價格可能是昨收」提示自然接手說明。
+        quote_time = raw["t"].astype(str).values
+        quote_time = np.where(used_prev_close_fallback.values, "", quote_time)
+        out["報價時間"] = quote_time
+    out["_退回昨收"] = used_prev_close_fallback.values
     out["來源"] = "MIS"
     out = out.dropna(subset=["即時價"]).drop_duplicates("股票代碼", keep="first").reset_index(drop=True)
     return out
@@ -3904,6 +3930,16 @@ with tab_intraday:
                                 f"若這個數字連續幾次完全一樣，代表交易所這段時間沒有新的成交資料（例如非交易時段），"
                                 f"不是程式沒有重新抓取。"
                             )
+                            # 個股層級：這批資料裡有幾檔因為抓不到當下成交價、被退回昨收價顯示
+                            # （這種列的「報價時間」會是空白，價格本身不是即時價）。跟下面整批 EOD_FALLBACK
+                            # 是不同層級的事——這裡只是少數個股，不代表整個 MIS 來源失效。
+                            if "_退回昨收" in live.columns:
+                                _fallback_n = int(live["_退回昨收"].sum())
+                                if _fallback_n > 0:
+                                    st.session_state["intraday_scan_debug"] += (
+                                        f" 其中 {_fallback_n} 檔目前抓不到最新成交價、暫時顯示昨收價"
+                                        f"（表格上「報價時間」欄位會是空白，可留意別把這當成即時價）。"
+                                    )
                             # 只有在 MIS 真即時來源整批失敗、退回舊版『每日收盤行情』備援時才會出現，
                             # 明確提醒使用者這一次抓到的不是即時資料。
                             if "來源" in live.columns and live["來源"].astype(str).str.contains("EOD_FALLBACK", na=False).any():
