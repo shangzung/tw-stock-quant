@@ -2896,9 +2896,12 @@ def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_pro
     price = safe_float(stock_row.get("現價"))
     atr = safe_float(stock_row.get("ATR"))
     buy_score = safe_float(stock_row.get("買進分"), 0)
-    decision = stock_row.get("決策", "") or ""
-    status = stock_row.get("狀態", "") or ""
-    risk = stock_row.get("風險", "") or ""
+    decision = stock_row.get("決策")
+    decision = "" if (decision is None or (isinstance(decision, float) and pd.isna(decision))) else str(decision)
+    status = stock_row.get("狀態")
+    status = "" if (status is None or (isinstance(status, float) and pd.isna(status))) else str(status)
+    risk = stock_row.get("風險")
+    risk = "" if (risk is None or (isinstance(risk, float) and pd.isna(risk))) else str(risk)
     rsi = safe_float(stock_row.get("RSI"), 50)
     adx = safe_float(stock_row.get("ADX"), 20)
     if pd.isna(adx):
@@ -3723,8 +3726,11 @@ def render_price_plan_html(plan):
 
 def render_pick_card(row, rank=None):
     prefix = f"{rank}. " if rank else ""
-    name = row.get("名稱", "") or ""
-    reasons_html = "".join(f"<div>{'✓' if '🟢' in row['決策'] else '✕' if '🔴' in row['決策'] else '•'} {r}</div>" for r in row.get("理由", [])[:3])
+    _name_raw = row.get("名稱")
+    name = "" if (_name_raw is None or (isinstance(_name_raw, float) and pd.isna(_name_raw))) else str(_name_raw)
+    _decision_raw = row.get("決策")
+    _decision_str = "" if (_decision_raw is None or (isinstance(_decision_raw, float) and pd.isna(_decision_raw))) else str(_decision_raw)
+    reasons_html = "".join(f"<div>{'✓' if '🟢' in _decision_str else '✕' if '🔴' in _decision_str else '•'} {r}</div>" for r in row.get("理由", [])[:3])
     st.markdown(f"""
     <div class="pick-card">
         <div class="pick-top">
@@ -3797,6 +3803,7 @@ with tab_intraday:
             <div class="intraday-kpi"><div class="intraday-kpi-label">⚡ 今日更新</div><div class="intraday-kpi-value">0 <span style="font-size:12px;color:var(--text-sub)">次 FinMind</span></div></div>
         </div>
         """, unsafe_allow_html=True)
+        st.caption("📌 這裡的報價是「按下掃描當下」的即時快照，不會自己持續跳動；要看最新價格請按「強制重抓」，或開啟下面的「自動更新」。")
 
         intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["⚖ 穩健", "🚀 積極模式"], horizontal=True, index=0, key="intraday_mode_choice",
                                          help="只調整「起漲訊號」的雷達分門檻，不會幫你自動下單：穩健＝門檻較高、訊號較少但較嚴謹；積極模式＝門檻最低、進場最早，但也最容易誤觸假訊號，適合願意多花時間篩選的人。")
@@ -3814,7 +3821,15 @@ with tab_intraday:
                                             "按這顆會直接跳過內部 15 秒快取，強制重新連線交易所抓一次最新資料，"
                                             "方便你確認到底是資料真的沒變、還是程式沒有重新抓取。")
 
-        if do_scan or force_refresh:
+        auto_refresh = st.checkbox(
+            "⏱️ 自動更新（每 30 秒重新抓一次最新報價）", value=st.session_state.get("intraday_auto_refresh", False),
+            key="intraday_auto_refresh",
+            help="這頁本來只有你按「掃描」或「強制重抓」的當下才會抓一次最新報價，之後畫面上的價格就固定不動了，"
+                 "不會自己一直跳動——這是設計上的行為，不是壞掉。開啟這個選項後，頁面會每 30 秒自動重新整理、"
+                 "重新抓一次 MIS 即時報價；分頁要保持開啟在背景才有用，離開這頁或關掉分頁就會停止。"
+        )
+
+        if do_scan or force_refresh or (auto_refresh and st.session_state.get("intraday_scan_out") is not None):
             if force_refresh:
                 try:
                     get_intraday_market_snapshot.clear()
@@ -4039,6 +4054,11 @@ with tab_intraday:
                 st.caption("盤中快照沒有分時明細與真實委託單資料，VWAP強弱、主力買盤強度是在此限制下的合理代理指標，不是交易所原始委買賣數據；「反應分」則是真實日K算出來的，可信度較高；僅供研究排序，不是進場保證。")
         else:
             st.info("尚未執行盤中掃描。按上方「🔍 掃描今日盤中機會」即可。")
+
+        if auto_refresh:
+            st.caption("⏱️ 自動更新已開啟，30 秒後會自動重新整理這頁並重抓最新報價…")
+            time.sleep(30)
+            st.rerun()
 
 # --- TAB：盤後深度掃描 ---
 with tab_eod:
