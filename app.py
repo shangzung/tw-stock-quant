@@ -199,6 +199,26 @@ def strategy_drift_report(detail, horizon="10D報酬", recent_n=20, baseline_n=6
             "recent_n": len(recent), "baseline_n": len(base), "message": msg}
 
 
+def calibration_pending_note(detail):
+    """AI 戰績表裡出現 None／空白時，說明原因：不是壞掉，是對應天數的交易日還沒走完。"""
+    if detail is None or detail.empty:
+        return None
+    counts = {}
+    for n in (5, 10, 20):
+        col = f"{n}D報酬"
+        if col in detail.columns:
+            counts[n] = int(pd.to_numeric(detail[col], errors="coerce").notna().sum())
+    total = len(detail)
+    if not counts or all(v == total for v in counts.values()):
+        return None  # 每個區間都算得出來，不用額外說明
+    parts = "、".join(f"{n}D 已有 {c}/{total} 筆" for n, c in counts.items())
+    return (
+        "ℹ️ 表格裡的 None／空白：不是系統壞掉，是「這個分數區間目前還沒有任何訊號滿足對應天數」——"
+        "例如 5D 報酬要等訊號發出後、市場真的走完 5 個交易日才算得出來，10D／20D 同理，訊號越新就越常出現 None。"
+        f"目前 {parts} 有結果，其餘會隨著交易日過去自動補上，不需要手動操作。"
+    )
+
+
 def calibration_reliability(n):
     n = int(n or 0)
     if n >= 200: return "高"
@@ -4672,6 +4692,9 @@ with tab_verify:
         if cal is not None and not cal.empty:
             st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
             st.caption(f"有效樣本 {len(detail):,} 筆；可靠度：{calibration_reliability(len(detail))}。")
+            _pending_note = calibration_pending_note(detail)
+            if _pending_note:
+                st.caption(_pending_note)
 
 with tab_advanced:
     st.warning("⚠️ 研究用途：以下工具提供給量化研究與策略驗證使用。一般投資決策不需要操作。AI戰績已自動更新，無需在此建立校準。")
@@ -5034,6 +5057,9 @@ with tab_advanced:
                 st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
                 total = len(detail)
                 st.caption(f"有效樣本 {total:,} 筆；整體校準可靠度：{calibration_reliability(total)}。樣本越少，越不應把勝率視為穩定機率。")
+                _pending_note = calibration_pending_note(detail)
+                if _pending_note:
+                    st.caption(_pending_note)
                 if "10D平均報酬" in cal.columns:
                     eligible = cal[cal["樣本數"] >= max(10, int(total * 0.03))]
                     if not eligible.empty:
