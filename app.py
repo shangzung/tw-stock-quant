@@ -29,6 +29,20 @@ import yfinance as yf
 from FinMind.data import DataLoader
 
 # =========================
+# V12.2：MIS 即時報價常被交易所的防護系統用「TLS 指紋」辨識出不是真的瀏覽器，
+# 直接把連線切斷（RemoteDisconnected），不是 headers 沒帶對，一般的 requests
+# 沒辦法模仿瀏覽器的 TLS handshake。curl_cffi 可以偽裝成真瀏覽器的 TLS 指紋。
+# 沒裝這個套件時整支程式仍然可以正常運作，只是 MIS 這個資料來源可能連不上、
+# 會自動退回備援來源；建議在部署環境執行 `pip install curl_cffi` 補上這個依賴。
+# =========================
+try:
+    from curl_cffi import requests as _curl_requests
+    _HAS_CURL_CFFI = True
+except Exception:
+    _curl_requests = None
+    _HAS_CURL_CFFI = False
+
+# =========================
 # -1. 本機持久化：Token / 掃描結果 / 庫存清單
 #     全部存在 app.py 同一層的 .quant_compass_cache 資料夾，純本機檔案，
 #     不會上傳到任何地方；換電腦或砍掉這個資料夾就等於全部重來。
@@ -1641,17 +1655,34 @@ def _mis_session_headers():
         "Origin": "https://mis.twse.com.tw",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
         "X-Requested-With": "XMLHttpRequest",
         "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
     }
+
+
+def _mis_new_session():
+    """優先用 curl_cffi 偽裝成真的 Chrome TLS 指紋；沒裝這個套件才退回原生 requests
+    （原生 requests 在有些防護較嚴的環境下可能被直接判定成機器人連線並切斷）。"""
+    if _HAS_CURL_CFFI:
+        s = _curl_requests.Session(impersonate="chrome124")
+    else:
+        s = requests.Session()
+    s.headers.update(_mis_session_headers())
+    return s
 
 
 def _mis_warm_session():
     """先打首頁拿基本 cookie，再對 API 打一次空查詢核發查詢 session。
     這裡刻意用短 timeout：熱身失敗（例如根本連不上 mis.twse.com.tw）要盡快放棄，
     不要讓使用者在還沒看到任何畫面之前就卡在這裡等好幾秒。"""
-    s = requests.Session()
-    s.headers.update(_mis_session_headers())
+    s = _mis_new_session()
     try:
         s.get(MIS_WARMUP_URL, timeout=5)
         s.get(MIS_STOCK_INFO_URL, params={"ex_ch": "", "json": "1", "delay": "0"}, timeout=5)
@@ -3470,11 +3501,18 @@ def render_settings_tab():
             st.info(
                 f"🩺 MIS 最近一次失敗細節（{_MIS_LAST_DIAGNOSIS.get('ts','-')}）："
                 f"{_MIS_LAST_DIAGNOSIS['detail']}\n\n"
-                "若這裡持續出現 HTTP 403 / 429，或「回應不是 JSON」，代表目前這台主機的對外 IP "
-                "被交易所判定為異常來源、整批直接拒絕，跟按鈕、快取、開盤時間都無關，重試也不會好——"
-                "常見於部署在海外機房的雲端主機（例如國外的 Streamlit Cloud / Render 等）。"
-                "遇到這種情況，本機執行、換一台位於台灣（或走台灣對外線路）的主機部署，通常就能恢復。"
+                "若這裡出現 HTTP 403 / 429、「回應不是 JSON」，代表這台主機的對外 IP "
+                "被交易所判定為異常來源、整批直接拒絕，換主機/地區部署才會好；"
+                "若是 ConnectionError / RemoteDisconnected（連線被對方主動切斷、不給回應），"
+                "通常是防護系統辨識出這不是真的瀏覽器連線（TLS 指紋），跟網路本身、按鈕、快取都無關。"
             )
+            if not _HAS_CURL_CFFI:
+                st.warning(
+                    "⚠️ 目前環境沒有安裝 `curl_cffi`（用來偽裝瀏覽器 TLS 指紋、繞過這類防護的關鍵套件）。"
+                    "請在終端機執行 `pip install curl_cffi` 後重新啟動 App，MIS 連線成功率通常會明顯提升。"
+                )
+            else:
+                st.caption("目前環境已啟用 curl_cffi（Chrome TLS 指紋偽裝），若仍持續失敗，可能是更嚴格的行為分析防護。")
 
     _flush_api_errors()
     if st.session_state["api_errors"]:
@@ -3805,9 +3843,8 @@ with tab_intraday:
                             st.session_state["intraday_scan_fallback_warning"] = (
                                 "⚠️ 這次即時報價來源（MIS）連線失敗，已自動退回交易所『每日收盤行情』備援，"
                                 "畫面上的價格可能不是這一刻的即時價，建議稍後按「強制重抓」再試一次。"
-                                f"{_diag_txt} 若這個原因持續出現 HTTP 403 / 429 或「回應不是 JSON」，"
-                                "通常代表目前部署主機的對外 IP 被交易所判定為異常來源並直接擋掉，"
-                                "跟按鈕或快取無關，重試也不會好，需要換一個能正常連上 mis.twse.com.tw 的主機/地區部署。"
+                                f"{_diag_txt} 到「⚙️ 系統設定 → API 診斷」可以看更完整的說明；"
+                                f"{'' if _HAS_CURL_CFFI else '目前環境未安裝 curl_cffi，若持續失敗建議先安裝它再重試（詳見系統設定頁）。'}"
                             )
                         else:
                             st.session_state["intraday_scan_fallback_warning"] = None
