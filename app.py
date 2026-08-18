@@ -1619,8 +1619,10 @@ def _normalize_intraday_frame(df, source):
 # =========================
 MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 MIS_WARMUP_URL = "https://mis.twse.com.tw/stock/index.jsp"
-MIS_BATCH_SIZE = 50  # V12.1：從 100 調降為 50，避免 URL 過長／單批被判定異常而整批被拒
-MIS_MAX_RETRY = 2    # 每一批最多重試次數（含第一次）
+MIS_BATCH_SIZE = 100
+MIS_MAX_RETRY = 1          # 每批最多重試 1 次，重試不重新熱身，避免整批連線被擋時越試越慢
+MIS_TOTAL_BUDGET_SEC = 18  # 全市場掃描的整體時間預算；超過就放棄剩下批次，直接用已經抓到的資料
+MIS_PROBE_TIMEOUT_HINT = ("connect", "timeout", "connection", "refused", "reset", "403", "429")
 
 # V12.1：記錄「這次到底發生什麼」，讓「API 診斷」面板可以顯示比 Exception 訊息更有用的資訊
 # （例如 HTTP 狀態碼、rtcode、回應是不是根本不是 JSON——這些通常代表交易所把這台主機的
@@ -1645,28 +1647,25 @@ def _mis_session_headers():
 
 
 def _mis_warm_session():
-    """MIS 沒有先建立 session cookie 常常會被視為異常連線、拿不到資料。
-    正確流程是：先打首頁拿基本 cookie，再對 API 本身打一次『空查詢』，
-    MIS 才會真正核發可用的查詢 session；只熱身首頁、不熱身 API 端點，
-    第一批真實查詢常常仍然被判定成沒有 session 而回空陣列。"""
+    """先打首頁拿基本 cookie，再對 API 打一次空查詢核發查詢 session。
+    這裡刻意用短 timeout：熱身失敗（例如根本連不上 mis.twse.com.tw）要盡快放棄，
+    不要讓使用者在還沒看到任何畫面之前就卡在這裡等好幾秒。"""
     s = requests.Session()
     s.headers.update(_mis_session_headers())
     try:
-        s.get(MIS_WARMUP_URL, timeout=8)
-    except Exception:
-        pass
-    try:
-        # 空查詢：只是為了讓 MIS 核發 session cookie，回什麼內容不重要
-        s.get(MIS_STOCK_INFO_URL, params={"ex_ch": "", "json": "1", "delay": "0"}, timeout=8)
-        time.sleep(0.3)  # session 生效需要一點時間，太快接著查會拿到同樣的空結果
+        s.get(MIS_WARMUP_URL, timeout=5)
+        s.get(MIS_STOCK_INFO_URL, params={"ex_ch": "", "json": "1", "delay": "0"}, timeout=5)
     except Exception:
         pass
     return s
 
 
 def _fetch_mis_batch(session, ex_ch_codes):
+    """回傳 (msgArray, hard_fail)。hard_fail=True 代表明顯是連線層級被擋
+    （逾時／連線被拒／403／429／回應不是 JSON），這種情況重試整批市場也不會變好。"""
     last_exc = None
-    for attempt in range(MIS_MAX_RETRY):
+    hard_fail = False
+    for attempt in range(1 + MIS_MAX_RETRY):
         try:
             r = session.get(
                 MIS_STOCK_INFO_URL,
@@ -1676,18 +1675,16 @@ def _fetch_mis_batch(session, ex_ch_codes):
                     "delay": "0",
                     "_": str(int(time.time() * 1000)),
                 },
-                timeout=12,
+                timeout=8,
             )
             status = r.status_code
             if status != 200:
                 _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
                                             detail=f"HTTP {status}（交易所拒絕或封鎖此主機的連線，重試通常無效）")
                 last_exc = ValueError(f"HTTP {status}")
-                # 403/429 等明確被擋的狀況，重試也沒意義，直接跳出換下一批
-                if status in (403, 429):
+                hard_fail = status in (403, 429)
+                if hard_fail:
                     break
-                time.sleep(0.5 * (attempt + 1))
-                session = _mis_warm_session()
                 continue
             try:
                 payload = r.json()
@@ -1696,34 +1693,36 @@ def _fetch_mis_batch(session, ex_ch_codes):
                 _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
                                             detail=f"回應不是 JSON（可能被導向驗證頁或遭封鎖）：{snippet}")
                 last_exc = ValueError("回應不是合法 JSON，可能是連線被擋或需要人機驗證")
-                session = _mis_warm_session()
-                time.sleep(0.5 * (attempt + 1))
-                continue
+                hard_fail = True
+                break
             if not isinstance(payload, dict):
                 last_exc = ValueError("回應格式異常（非物件）")
                 continue
             rtcode = str(payload.get("rtcode", ""))
             msg_array = payload.get("msgArray", [])
             if rtcode not in ("", "0000") and not msg_array:
-                # rtcode 常見：5001 = 查詢 session 不存在/過期，重新熱身後再試一次
                 _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
                                             detail=f"rtcode={rtcode}，rtmessage={payload.get('rtmessage','')}")
                 last_exc = ValueError(f"MIS rtcode={rtcode} {payload.get('rtmessage','')}")
-                session = _mis_warm_session()
-                time.sleep(0.5 * (attempt + 1))
                 continue
-            return msg_array
+            return msg_array, False
         except Exception as e:
             last_exc = e
-            _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"), detail=f"{type(e).__name__}: {e}")
-            time.sleep(0.5 * (attempt + 1))
-            session = _mis_warm_session()
+            msg = f"{type(e).__name__}: {e}"
+            _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"), detail=msg)
+            if any(k in msg.lower() for k in MIS_PROBE_TIMEOUT_HINT):
+                hard_fail = True
+                break
     _log_api_error("MIS getStockInfo", ex_ch_codes[0] if ex_ch_codes else "-", last_exc or ValueError("未知錯誤"))
-    return []
+    return [], hard_fail
 
 
 def _get_intraday_snapshot_via_mis():
-    """主要來源：MIS 即時報價（真正的盤中資料，非收盤後才產生的報表）。"""
+    """主要來源：MIS 即時報價（真正的盤中資料，非收盤後才產生的報表）。
+    V12.1：先用第一批當『探針』——如果第一批就是連線層級被擋（逾時/連線被拒/403/429/
+    回應不是 JSON），代表這整個環境本來就連不上 mis.twse.com.tw，後面幾十批只會用同樣的
+    方式失敗，逐批硬試只會讓使用者在空白畫面前多等好幾十秒；探到就直接放棄，讓外層
+    盡快切到備援來源，而不是拖到整體逾時。"""
     uni = get_stock_universe()
     if uni is None or uni.empty or "stock_id" not in uni.columns:
         return pd.DataFrame()
@@ -1736,9 +1735,25 @@ def _get_intraday_snapshot_via_mis():
         return pd.DataFrame()
 
     session = _mis_warm_session()
+    batches = [ex_ch_all[i:i + MIS_BATCH_SIZE] for i in range(0, len(ex_ch_all), MIS_BATCH_SIZE)]
+
     rows = []
-    for i in range(0, len(ex_ch_all), MIS_BATCH_SIZE):
-        rows.extend(_fetch_mis_batch(session, ex_ch_all[i:i + MIS_BATCH_SIZE]))
+    probe_rows, probe_hard_fail = _fetch_mis_batch(session, batches[0])
+    if probe_hard_fail:
+        # 第一批就明顯被擋，判定整個環境連不上，立刻放棄改走備援，不要逐批硬試
+        return pd.DataFrame()
+    rows.extend(probe_rows)
+
+    start_ts = time.time()
+    for batch in batches[1:]:
+        if time.time() - start_ts > MIS_TOTAL_BUDGET_SEC:
+            # 超過整體時間預算：用已經抓到的部分資料，總比讓使用者一直等畫面出來好
+            break
+        r, hard_fail = _fetch_mis_batch(session, batch)
+        rows.extend(r)
+        if hard_fail and not rows:
+            # 還沒抓到任何資料就連續遇到硬性阻擋，判斷是環境問題，提早結束
+            break
         time.sleep(0.03)  # 對交易所客氣一點，避免短時間內大量連續請求被判定異常
     if not rows:
         return pd.DataFrame()
