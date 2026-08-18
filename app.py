@@ -1123,6 +1123,23 @@ EOD_CACHE_TTL = 21600
 # =========================
 INTRADAY_CACHE_TTL = 15
 INTRADAY_TOP_N = 30
+
+# V12.3：盤中「自動更新」背景刷新機制。
+# 舊版做法是 time.sleep(30) 卡住整個 session 再 st.rerun()，缺點：
+#   1) 這 30 秒內使用者完全不能互動（按鈕、切頁都沒反應）；
+#   2) 雲端部署容易撞到 reverse proxy / websocket 的 idle timeout，看起來像「自動更新常常自己停掉」。
+# 改用 st.fragment(run_every=...)：只有掛了這個 decorator 的區塊會在背景每 N 秒自己重跑，
+# 不卡住整頁、也不需要手動 sleep。st.fragment 需要 Streamlit >= 1.33，這裡做版本相容：
+# 抓不到 st.fragment 時自動退回舊的 sleep+rerun 寫法，並在畫面上提醒使用者可以升級套件。
+_HAS_ST_FRAGMENT = hasattr(st, "fragment")
+
+
+def intraday_refresh_decorator(active: bool):
+    """active=True 且環境支援 st.fragment 時，回傳『每 30 秒背景自動重跑』的 decorator；
+    不支援時回傳「不做任何事」的 decorator，由呼叫端自行退回舊的 sleep+rerun 機制。"""
+    if _HAS_ST_FRAGMENT:
+        return st.fragment(run_every=30 if active else None)
+    return lambda fn: fn
 INTRADAY_BASE_WEIGHT = 0.70
 INTRADAY_MOMENTUM_WEIGHT = 0.30
 INTRADAY_SCAN_MIN_TURNOVER = 50_000_000
@@ -3819,22 +3836,6 @@ with tab_intraday:
     if u.empty:
         st.error("無法取得股票清單，請到「⚙️ 系統設定」檢查 API。")
     else:
-        cached_eod = load_saved_scan()
-        eod_time = cached_eod.get("saved_at", "尚無") if isinstance(cached_eod, dict) else "尚無"
-        cached_live = load_intraday_scan()
-        live_saved_at = cached_live.get("saved_at", "尚無") if isinstance(cached_live, dict) else "尚無"
-        current_saved_at = st.session_state.get("intraday_scan_saved_at") or live_saved_at
-        time_text = str(current_saved_at)[11:16] if current_saved_at and len(str(current_saved_at)) >= 16 else "—"
-
-        st.markdown(f"""
-        <div class="intraday-kpi-grid">
-            <div class="intraday-kpi"><div class="intraday-kpi-label">📊 掃描市場</div><div class="intraday-kpi-value">{len(u):,} <span style="font-size:12px;color:var(--text-sub)">檔</span></div></div>
-            <div class="intraday-kpi"><div class="intraday-kpi-label">🕒 資料時間</div><div class="intraday-kpi-value">{time_text}</div></div>
-            <div class="intraday-kpi"><div class="intraday-kpi-label">⚡ 今日更新</div><div class="intraday-kpi-value">0 <span style="font-size:12px;color:var(--text-sub)">次 FinMind</span></div></div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.caption("📌 這裡的報價是「按下掃描當下」的即時快照，不會自己持續跳動；要看最新價格請按「強制重抓」，或開啟下面的「自動更新」。")
-
         intraday_mode_choice = st.radio("⚡ 起漲雷達模式", ["⚖ 穩健", "🚀 積極模式"], horizontal=True, index=0, key="intraday_mode_choice",
                                          help="只調整「起漲訊號」的雷達分門檻，不會幫你自動下單：穩健＝門檻較高、訊號較少但較嚴謹；積極模式＝門檻最低、進場最早，但也最容易誤觸假訊號，適合願意多花時間篩選的人。")
         intraday_mode = {"⚖ 穩健": "平衡", "🚀 積極模式": "積極"}.get(intraday_mode_choice, DEFAULT_MODE)
@@ -3842,260 +3843,288 @@ with tab_intraday:
         if not is_tw_market_hours():
             st.caption("⏰ 目前不是台股交易時段（09:00–13:30，週一至週五）。交易所這時候回傳的是「最近一個交易日」的收盤總結，內容不會隨時間改變——所以重複按掃描、轉完圈圈後結果跟之前一樣，是正常現象，不是按鈕壞了。開盤後再測，數字才會持續變動。")
 
-        scan_col1, scan_col2 = st.columns([3, 1.5])
-        with scan_col1:
-            do_scan = st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True)
-        with scan_col2:
-            force_refresh = st.button("🔄 強制重抓（略過快取）", use_container_width=True,
-                                       help="平常按左邊「掃描」就好。如果你連續按了好幾次，畫面內容都長得一模一樣，"
-                                            "按這顆會直接跳過內部 15 秒快取，強制重新連線交易所抓一次最新資料，"
-                                            "方便你確認到底是資料真的沒變、還是程式沒有重新抓取。")
-
         auto_refresh = st.checkbox(
-            "⏱️ 自動更新（每 30 秒重新抓一次最新報價）", value=st.session_state.get("intraday_auto_refresh", False),
+            "⏱️ 自動更新（每 30 秒在背景重抓一次最新報價，不卡頁面）", value=st.session_state.get("intraday_auto_refresh", False),
             key="intraday_auto_refresh",
             help="這頁本來只有你按「掃描」或「強制重抓」的當下才會抓一次最新報價，之後畫面上的價格就固定不動了，"
-                 "不會自己一直跳動——這是設計上的行為，不是壞掉。開啟這個選項後，頁面會每 30 秒自動重新整理、"
-                 "重新抓一次 MIS 即時報價；分頁要保持開啟在背景才有用，離開這頁或關掉分頁就會停止。"
+                 "不會自己一直跳動——這是設計上的行為，不是壞掉。開啟這個選項後，下面這塊區域會在背景每 30 秒"
+                 "自動重新抓一次 MIS 即時報價，不需要整頁重新整理，也不會卡住你操作其他按鈕；"
+                 "分頁要保持開啟在背景才有用，離開這頁或關掉分頁就會停止。"
         )
+        if auto_refresh and not _HAS_ST_FRAGMENT:
+            st.caption("ℹ️ 目前環境的 Streamlit 版本較舊，偵測不到背景自動刷新（st.fragment）功能，"
+                       "自動更新會退回『整頁重新整理』的舊方式，30 秒內畫面會暫時無法操作。"
+                       "建議升級 `streamlit>=1.33` 以取得不卡頁的背景刷新體驗。")
 
-        if do_scan or force_refresh or (auto_refresh and st.session_state.get("intraday_scan_out") is not None):
-            if force_refresh:
-                try:
-                    get_intraday_market_snapshot.clear()
-                except Exception:
-                    pass
-            with st.spinner("連線交易所並掃描市場中…"):
-                try:
-                    live = run_intraday_scan(u, top_n=30, mode=intraday_mode)
-                    save_intraday_scan(live)
-                    st.session_state["intraday_scan_out"] = live
-                    st.session_state["intraday_scan_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    st.session_state["intraday_scan_mode"] = intraday_mode
-                    if isinstance(live, pd.DataFrame) and not live.empty and "即時漲跌%" in live.columns:
-                        _avg_pct = safe_float(pd.to_numeric(live["即時漲跌%"], errors="coerce").mean())
-                        _avg_txt = f"{_avg_pct:+.2f}%" if not pd.isna(_avg_pct) else "—"
-                        st.session_state["intraday_scan_debug"] = (
-                            f"本次共 {len(live)} 檔通過成交金額門檻，平均即時漲跌 {_avg_txt}。"
-                            f"若這個數字連續幾次完全一樣，代表交易所這段時間沒有新的成交資料（例如非交易時段），"
-                            f"不是程式沒有重新抓取。"
-                        )
-                        # 只有在 MIS 真即時來源整批失敗、退回舊版『每日收盤行情』備援時才會出現，
-                        # 明確提醒使用者這一次抓到的不是即時資料。
-                        if "來源" in live.columns and live["來源"].astype(str).str.contains("EOD_FALLBACK", na=False).any():
-                            _diag = _MIS_LAST_DIAGNOSIS.get("detail") or ""
-                            _diag_txt = f"（偵測到的原因：{_diag}）" if _diag else ""
-                            st.session_state["intraday_scan_fallback_warning"] = (
-                                "⚠️ 這次即時報價來源（MIS）連線失敗，已自動退回交易所『每日收盤行情』備援，"
-                                "畫面上的價格可能不是這一刻的即時價，建議稍後按「強制重抓」再試一次。"
-                                f"{_diag_txt} 到「⚙️ 系統設定 → API 診斷」可以看更完整的說明；"
-                                f"{'' if _HAS_CURL_CFFI else '目前環境未安裝 curl_cffi，若持續失敗建議先安裝它再重試（詳見系統設定頁）。'}"
-                            )
-                        else:
-                            st.session_state["intraday_scan_fallback_warning"] = None
-                    else:
-                        st.session_state["intraday_scan_debug"] = "本次掃描沒有股票通過成交金額門檻（可能是非交易時段、市場尚無成交）。"
-                    st.rerun()
-                except Exception as exc:
-                    _log_api_error("run_intraday_scan", "-", exc)
-                    st.error("盤中行情取得失敗；請稍後再試。這次沒有呼叫 FinMind。")
-
-        if st.session_state.get("intraday_scan_out") is None:
+        @intraday_refresh_decorator(auto_refresh)
+        def render_intraday_scan_section(u=u, intraday_mode=intraday_mode, auto_refresh=auto_refresh):
+            cached_eod = load_saved_scan()
+            eod_time = cached_eod.get("saved_at", "尚無") if isinstance(cached_eod, dict) else "尚無"
             cached_live = load_intraday_scan()
-            if isinstance(cached_live, dict):
-                st.session_state["intraday_scan_out"] = cached_live.get("out")
-                st.session_state["intraday_scan_saved_at"] = cached_live.get("saved_at")
+            live_saved_at = cached_live.get("saved_at", "尚無") if isinstance(cached_live, dict) else "尚無"
+            current_saved_at = st.session_state.get("intraday_scan_saved_at") or live_saved_at
+            time_text = str(current_saved_at)[11:16] if current_saved_at and len(str(current_saved_at)) >= 16 else "—"
 
-        live = st.session_state.get("intraday_scan_out")
-        if isinstance(live, pd.DataFrame) and not live.empty:
-            saved_at = st.session_state.get("intraday_scan_saved_at", "")
-            if saved_at:
-                st.caption(f"🕒 最近一次盤中掃描：{saved_at} · 盤後研究：{eod_time}")
-            if st.session_state.get("intraday_scan_debug"):
-                st.caption(f"🔬 診斷：{st.session_state['intraday_scan_debug']}")
-            if st.session_state.get("intraday_scan_fallback_warning"):
-                st.warning(st.session_state["intraday_scan_fallback_warning"])
+            st.markdown(f"""
+            <div class="intraday-kpi-grid">
+                <div class="intraday-kpi"><div class="intraday-kpi-label">📊 掃描市場</div><div class="intraday-kpi-value">{len(u):,} <span style="font-size:12px;color:var(--text-sub)">檔</span></div></div>
+                <div class="intraday-kpi"><div class="intraday-kpi-label">🕒 資料時間</div><div class="intraday-kpi-value">{time_text}</div></div>
+                <div class="intraday-kpi"><div class="intraday-kpi-label">⚡ 今日更新</div><div class="intraday-kpi-value">0 <span style="font-size:12px;color:var(--text-sub)">次 FinMind</span></div></div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.caption("📌 這裡的報價是「按下掃描當下」的即時快照，不會自己持續跳動；要看最新價格請按「強制重抓」，或開啟上面的「自動更新」。")
 
-            top3 = live.head(3).copy()
-            st.markdown("### 🔥 今日值得關注")
-            st.caption("不是單純找漲最多，而是把盤後正式決策、風險與盤中變化放在一起，找出最值得花時間看的股票。")
+            scan_col1, scan_col2 = st.columns([3, 1.5])
+            with scan_col1:
+                do_scan = st.button("🔍 掃描今日盤中機會", type="primary", use_container_width=True)
+            with scan_col2:
+                force_refresh = st.button("🔄 強制重抓（略過快取）", use_container_width=True,
+                                           help="平常按左邊「掃描」就好。如果你連續按了好幾次，畫面內容都長得一模一樣，"
+                                                "按這顆會直接跳過內部 15 秒快取，強制重新連線交易所抓一次最新資料，"
+                                                "方便你確認到底是資料真的沒變、還是程式沒有重新抓取。")
 
-            cards = []
-            for _, r in top3.iterrows():
-                action = str(r.get("行動", "🟠 觀察"))
-                risk = str(r.get("風險", "🟡 中"))
-                action_cls = "ip-buy" if "🟢" in action else "ip-hot" if "🚀" in action else "ip-wait" if "🟡" in action else "ip-observe" if "🟠" in action else "ip-skip"
-                risk_cls = "ip-risk-low" if "🟢" in risk else "ip-risk-mid" if "🟡" in risk else "ip-risk-high"
-                ai = safe_float(r.get("盤中 AI"), np.nan)
-                base = safe_float(r.get("基準買進分"), np.nan)
-                delta = safe_float(r.get("AI變化"), np.nan)
+            if do_scan or force_refresh or (auto_refresh and st.session_state.get("intraday_scan_out") is not None):
+                if force_refresh:
+                    try:
+                        get_intraday_market_snapshot.clear()
+                    except Exception:
+                        pass
+                with st.spinner("連線交易所並掃描市場中…"):
+                    try:
+                        live = run_intraday_scan(u, top_n=30, mode=intraday_mode)
+                        save_intraday_scan(live)
+                        st.session_state["intraday_scan_out"] = live
+                        st.session_state["intraday_scan_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.session_state["intraday_scan_mode"] = intraday_mode
+                        if isinstance(live, pd.DataFrame) and not live.empty and "即時漲跌%" in live.columns:
+                            _avg_pct = safe_float(pd.to_numeric(live["即時漲跌%"], errors="coerce").mean())
+                            _avg_txt = f"{_avg_pct:+.2f}%" if not pd.isna(_avg_pct) else "—"
+                            st.session_state["intraday_scan_debug"] = (
+                                f"本次共 {len(live)} 檔通過成交金額門檻，平均即時漲跌 {_avg_txt}。"
+                                f"若這個數字連續幾次完全一樣，代表交易所這段時間沒有新的成交資料（例如非交易時段），"
+                                f"不是程式沒有重新抓取。"
+                            )
+                            # 只有在 MIS 真即時來源整批失敗、退回舊版『每日收盤行情』備援時才會出現，
+                            # 明確提醒使用者這一次抓到的不是即時資料。
+                            if "來源" in live.columns and live["來源"].astype(str).str.contains("EOD_FALLBACK", na=False).any():
+                                _diag = _MIS_LAST_DIAGNOSIS.get("detail") or ""
+                                _diag_txt = f"（偵測到的原因：{_diag}）" if _diag else ""
+                                st.session_state["intraday_scan_fallback_warning"] = (
+                                    "⚠️ 這次即時報價來源（MIS）連線失敗，已自動退回交易所『每日收盤行情』備援，"
+                                    "畫面上的價格可能不是這一刻的即時價，建議稍後按「強制重抓」再試一次。"
+                                    f"{_diag_txt} 到「⚙️ 系統設定 → API 診斷」可以看更完整的說明；"
+                                    f"{'' if _HAS_CURL_CFFI else '目前環境未安裝 curl_cffi，若持續失敗建議先安裝它再重試（詳見系統設定頁）。'}"
+                                )
+                            else:
+                                st.session_state["intraday_scan_fallback_warning"] = None
+                        else:
+                            st.session_state["intraday_scan_debug"] = "本次掃描沒有股票通過成交金額門檻（可能是非交易時段、市場尚無成交）。"
+                        # 按鈕點擊或背景 run_every 觸發的都已經是這個 fragment 本身的重跑，
+                        # 不需要再手動呼叫 st.rerun()；手動呼叫在舊版 Streamlit 上反而會多重整一次整頁。
+                    except Exception as exc:
+                        _log_api_error("run_intraday_scan", "-", exc)
+                        st.error("盤中行情取得失敗；請稍後再試。這次沒有呼叫 FinMind。")
 
-                if pd.isna(delta):
-                    delta_html = "—"
-                else:
-                    arrow = "▲" if delta > 0 else "▼" if delta < 0 else "＝"
-                    cls = "tw-up" if delta > 0 else "tw-down" if delta < 0 else "tw-flat"
-                    delta_html = f"{base:.0f} → {ai:.0f}　<span class='{cls}'>{arrow} {abs(delta):.1f}</span>"
+            if st.session_state.get("intraday_scan_out") is None:
+                cached_live = load_intraday_scan()
+                if isinstance(cached_live, dict):
+                    st.session_state["intraday_scan_out"] = cached_live.get("out")
+                    st.session_state["intraday_scan_saved_at"] = cached_live.get("saved_at")
 
-                price = safe_float(r.get("即時價"), np.nan)
-                pct = safe_float(r.get("即時漲跌%"), np.nan)
-                pct_cls = "tw-up" if pct > 0 else "tw-down" if pct < 0 else "tw-flat"
-                quote_time = str(r.get("報價時間", "") or "").strip()
-                quote_time_html = f"　<span class='ip-quote-time'>成交 {html.escape(quote_time)}</span>" if quote_time and quote_time != "-" else ""
+            live = st.session_state.get("intraday_scan_out")
+            if isinstance(live, pd.DataFrame) and not live.empty:
+                saved_at = st.session_state.get("intraday_scan_saved_at", "")
+                if saved_at:
+                    st.caption(f"🕒 最近一次盤中掃描：{saved_at} · 盤後研究：{eod_time}")
+                if st.session_state.get("intraday_scan_debug"):
+                    st.caption(f"🔬 診斷：{st.session_state['intraday_scan_debug']}")
+                if st.session_state.get("intraday_scan_fallback_warning"):
+                    st.warning(st.session_state["intraday_scan_fallback_warning"])
 
-                # Escape dataframe text so a stock name/reason can never break the HTML block.
-                code = html.escape(str(r.get("股票代碼", "")))
-                name = html.escape(str(r.get("名稱", "")))
-                action_safe = html.escape(action)
-                risk_safe = html.escape(risk)
-                change_safe = html.escape(str(r.get("盤中變化", "🟡 盤中中性")))
-                reason_safe = html.escape(str(r.get("關注原因", "等待更多盤中訊號確認")))
-                rank = int(r.get("排名", 0))
+                top3 = live.head(3).copy()
+                st.markdown("### 🔥 今日值得關注")
+                st.caption("不是單純找漲最多，而是把盤後正式決策、風險與盤中變化放在一起，找出最值得花時間看的股票。")
 
-                card_html = (
-                    f'<div class="intraday-pick">'
-                    f'<div class="ip-rank">#{rank}</div>'
-                    f'<div class="ip-name">{code} {name}</div>'
-                    f'<div class="ip-score-row"><span class="ip-score">{ai:.0f}</span><span class="ip-score-label">盤中 AI</span></div>'
-                    f'<div class="ip-badges"><span class="ip-action {action_cls}">{action_safe}</span>'
-                    f'<span class="ip-risk {risk_cls}">{risk_safe}</span>'
-                    f'<span class="ip-change">{change_safe}</span></div>'
-                    f'<div class="ip-delta">{delta_html}</div>'
-                    f'<div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span>{quote_time_html}</div>'
-                    f'<div class="ip-reason">{reason_safe}</div>'
-                    f'</div>'
-                )
-                cards.append(card_html)
-
-            # IMPORTANT: keep all cards inside ONE continuous HTML block.
-            # Streamlit's Markdown parser may treat blank-line-separated HTML blocks as raw text.
-            cards_html = "<div class='intraday-pick-grid'>" + "".join(cards) + "</div>"
-            st.markdown(cards_html, unsafe_allow_html=True)
-
-            st.markdown("### 🔎 查看分析")
-            for _, r in top3.iterrows():
-                code = r.get("股票代碼", "")
-                name = r.get("名稱", "")
-                action = r.get("行動", "🟠 觀察")
-                with st.expander(f"#{int(r.get('排名', 0))}　{code} {name}　｜　{action}", expanded=False):
+                cards = []
+                for _, r in top3.iterrows():
+                    action = str(r.get("行動", "🟠 觀察"))
+                    risk = str(r.get("風險", "🟡 中"))
+                    action_cls = "ip-buy" if "🟢" in action else "ip-hot" if "🚀" in action else "ip-wait" if "🟡" in action else "ip-observe" if "🟠" in action else "ip-skip"
+                    risk_cls = "ip-risk-low" if "🟢" in risk else "ip-risk-mid" if "🟡" in risk else "ip-risk-high"
                     ai = safe_float(r.get("盤中 AI"), np.nan)
                     base = safe_float(r.get("基準買進分"), np.nan)
-                    momentum = safe_float(r.get("盤中動能分"), np.nan)
-                    turnover = safe_float(r.get("成交金額"), np.nan)
-                    current = safe_float(r.get("即時價"), np.nan)
-                    pct = safe_float(r.get("即時漲跌%"), np.nan)
                     delta = safe_float(r.get("AI變化"), np.nan)
-                    risk = r.get("風險", "—")
-                    formal_decision = r.get("決策", "—")
-                    status = r.get("狀態", "—")
-                    quality = r.get("資料品質", "—")
-                    delta_text = "—" if pd.isna(delta) else f"{delta:+.1f}"
-                    turnover_text = "—" if pd.isna(turnover) else f"{turnover/1e8:.2f} 億"
-                    current_text = "—" if pd.isna(current) else f"{current:.2f}"
-                    pct_text = "—" if pd.isna(pct) else f"{pct:+.1f}%"
-                    ai_text = "—" if pd.isna(ai) else f"{ai:.1f}"
-                    base_text = "—" if pd.isna(base) else f"{base:.1f}"
-                    mom_text = "—" if pd.isna(momentum) else f"{momentum:.1f}"
-                    reaction = safe_float(r.get("反應分"), np.nan)
-                    hot_signal = r.get("找飆股訊號", "⚪ 不明顯")
-                    reaction_text = "—" if pd.isna(reaction) else f"{reaction:.0f}"
-                    st.markdown("<div class='intraday-detail-title'>🧠 AI 分析</div>", unsafe_allow_html=True)
-                    st.markdown(f"""
-                    <div class="intraday-detail-grid">
-                        <div class="intraday-detail-box"><div class="label">買進分</div><div class="value">{base_text}</div></div>
-                        <div class="intraday-detail-box"><div class="label">盤中動能</div><div class="value">{mom_text}</div></div>
-                        <div class="intraday-detail-box"><div class="label">反應分</div><div class="value">{reaction_text}</div></div>
-                        <div class="intraday-detail-box"><div class="label">盤中 AI</div><div class="value">{ai_text}</div></div>
-                        <div class="intraday-detail-box"><div class="label">成交金額</div><div class="value">{turnover_text}</div></div>
-                        <div class="intraday-detail-box"><div class="label">風險</div><div class="value">{risk}</div></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.markdown(f"**🎯 現在怎麼處理：{action}**")
-                    st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}　｜　昨日反應：{hot_signal}")
-                    st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
-                    _quote_time = str(r.get("報價時間", "") or "").strip()
-                    _quote_time_text = f"（交易所成交時間：{_quote_time}）" if _quote_time and _quote_time != "-" else "（此股目前無成交時間資料，價格可能是昨收）"
-                    st.markdown(f"**📈 現價：** {current_text} {_quote_time_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
-                    st.caption("💡 「交易所成交時間」是這個價格真正的最後成交時刻（來自交易所，不是我們抓取的時間）——如果這個時間長時間沒有往後跳，代表這檔股票本身這段時間沒有新成交，不是頁面沒有更新；如果連這個時間都很舊，先按「強制重抓」試一次看看。")
-                    st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
-                    if "🔴 不買" in str(formal_decision):
-                        st.info("盤後模型仍維持「不買」；盤中首頁的「等待買點」只代表今天值得重新觀察，不代表進場條件已成立。")
-                    elif "🟢 可買" in str(formal_decision):
-                        st.success("盤後模型已達正式進場門檻；仍請搭配風險與盤中狀態判斷，不把分數視為報酬保證。")
-                    if "🔥 反應強訊號" in str(hot_signal) and "🟢 可買" not in str(formal_decision):
-                        st.warning("👀 這檔股票出現「🔥 搶先關注」標籤，代表昨天跳空／爆量／收在高點的反應很強，AI 覺得值得先注意——但還沒有通過完整的正式買進條件檢查。建議做法：先觀察、先加進你的關注清單，不要因為看到這個標籤就急著買，等它也拿到「🟢 可買」再考慮進場，會比較穩。")
 
-                    plan = suggest_price_plan(r)
-                    if plan:
-                        st.markdown(render_price_plan_html(plan), unsafe_allow_html=True)
+                    if pd.isna(delta):
+                        delta_html = "—"
                     else:
-                        st.caption("目前資料不足以算出進出場價參考（缺 ATR／波動度資料），建議先到「🔍 股票分析」查一次這檔股票。")
+                        arrow = "▲" if delta > 0 else "▼" if delta < 0 else "＝"
+                        cls = "tw-up" if delta > 0 else "tw-down" if delta < 0 else "tw-flat"
+                        delta_html = f"{base:.0f} → {ai:.0f}　<span class='{cls}'>{arrow} {abs(delta):.1f}</span>"
 
-            st.markdown("### 📋 一般模式")
-            simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "報價時間", "盤中 AI", "行動", "風險"] if c in live.columns]
-            st.dataframe(
-                live[simple_cols], use_container_width=True, hide_index=True,
-                column_config={
-                    "排名": st.column_config.NumberColumn("排名", width="small"),
-                    "股票代碼": st.column_config.TextColumn("股票", width="small"),
-                    "名稱": st.column_config.TextColumn("名稱", width="medium"),
-                    "即時價": st.column_config.NumberColumn("現價", format="%.2f"),
-                    "報價時間": st.column_config.TextColumn("成交時間", width="small",
-                                                          help="交易所這筆報價真正的最後成交時刻；長時間沒跳動代表這檔股票本身沒有新成交，不是頁面沒更新。"),
-                    "盤中 AI": st.column_config.ProgressColumn("盤中 AI", min_value=0, max_value=100, format="%.0f"),
-                    "行動": st.column_config.TextColumn(
-                        "行動", width="medium",
-                        help="🟢可買＝正式買進訊號成立；🔥搶先關注＝昨天反應強、還沒過正式門檻；🟡等待買點＝接近但還沒到；🟠觀察＝先留意就好；🔴先跳過＝目前不建議進場。",
-                    ),
-                    "風險": st.column_config.TextColumn("風險", width="small"),
-                },
-            )
-            st.caption("看不懂「行動」欄位？把滑鼠移到欄位標題上就有說明；簡單說：🟢可買 > 🔥搶先關注 > 🟡等待買點 > 🟠觀察 > 🔴先跳過，愈前面愈值得先看。")
+                    price = safe_float(r.get("即時價"), np.nan)
+                    pct = safe_float(r.get("即時漲跌%"), np.nan)
+                    pct_cls = "tw-up" if pct > 0 else "tw-down" if pct < 0 else "tw-flat"
+                    quote_time = str(r.get("報價時間", "") or "").strip()
+                    quote_time_html = f"　<span class='ip-quote-time'>成交 {html.escape(quote_time)}</span>" if quote_time and quote_time != "-" else ""
 
-            with st.expander("📊 進階：完整盤中資料", expanded=False):
-                advanced_cols = [c for c in [
-                    "排名", "股票代碼", "名稱", "即時價", "即時漲跌%", "成交金額",
-                    "基準買進分", "盤中動能分", "盤中 AI", "AI變化", "行動", "盤中變化",
-                    "決策", "風險", "狀態", "資料品質", "近1日漲跌%", "近5日漲跌%", "近20日漲跌%",
-                    "優先級", "量比", "趨勢", "說明", "反應分", "找飆股訊號", "跳空%", "反應量比",
-                ] if c in live.columns]
+                    # Escape dataframe text so a stock name/reason can never break the HTML block.
+                    code = html.escape(str(r.get("股票代碼", "")))
+                    name = html.escape(str(r.get("名稱", "")))
+                    action_safe = html.escape(action)
+                    risk_safe = html.escape(risk)
+                    change_safe = html.escape(str(r.get("盤中變化", "🟡 盤中中性")))
+                    reason_safe = html.escape(str(r.get("關注原因", "等待更多盤中訊號確認")))
+                    rank = int(r.get("排名", 0))
+
+                    card_html = (
+                        f'<div class="intraday-pick">'
+                        f'<div class="ip-rank">#{rank}</div>'
+                        f'<div class="ip-name">{code} {name}</div>'
+                        f'<div class="ip-score-row"><span class="ip-score">{ai:.0f}</span><span class="ip-score-label">盤中 AI</span></div>'
+                        f'<div class="ip-badges"><span class="ip-action {action_cls}">{action_safe}</span>'
+                        f'<span class="ip-risk {risk_cls}">{risk_safe}</span>'
+                        f'<span class="ip-change">{change_safe}</span></div>'
+                        f'<div class="ip-delta">{delta_html}</div>'
+                        f'<div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span>{quote_time_html}</div>'
+                        f'<div class="ip-reason">{reason_safe}</div>'
+                        f'</div>'
+                    )
+                    cards.append(card_html)
+
+                # IMPORTANT: keep all cards inside ONE continuous HTML block.
+                # Streamlit's Markdown parser may treat blank-line-separated HTML blocks as raw text.
+                cards_html = "<div class='intraday-pick-grid'>" + "".join(cards) + "</div>"
+                st.markdown(cards_html, unsafe_allow_html=True)
+
+                st.markdown("### 🔎 查看分析")
+                for _, r in top3.iterrows():
+                    code = r.get("股票代碼", "")
+                    name = r.get("名稱", "")
+                    action = r.get("行動", "🟠 觀察")
+                    with st.expander(f"#{int(r.get('排名', 0))}　{code} {name}　｜　{action}", expanded=False):
+                        ai = safe_float(r.get("盤中 AI"), np.nan)
+                        base = safe_float(r.get("基準買進分"), np.nan)
+                        momentum = safe_float(r.get("盤中動能分"), np.nan)
+                        turnover = safe_float(r.get("成交金額"), np.nan)
+                        current = safe_float(r.get("即時價"), np.nan)
+                        pct = safe_float(r.get("即時漲跌%"), np.nan)
+                        delta = safe_float(r.get("AI變化"), np.nan)
+                        risk = r.get("風險", "—")
+                        formal_decision = r.get("決策", "—")
+                        status = r.get("狀態", "—")
+                        quality = r.get("資料品質", "—")
+                        delta_text = "—" if pd.isna(delta) else f"{delta:+.1f}"
+                        turnover_text = "—" if pd.isna(turnover) else f"{turnover/1e8:.2f} 億"
+                        current_text = "—" if pd.isna(current) else f"{current:.2f}"
+                        pct_text = "—" if pd.isna(pct) else f"{pct:+.1f}%"
+                        ai_text = "—" if pd.isna(ai) else f"{ai:.1f}"
+                        base_text = "—" if pd.isna(base) else f"{base:.1f}"
+                        mom_text = "—" if pd.isna(momentum) else f"{momentum:.1f}"
+                        reaction = safe_float(r.get("反應分"), np.nan)
+                        hot_signal = r.get("找飆股訊號", "⚪ 不明顯")
+                        reaction_text = "—" if pd.isna(reaction) else f"{reaction:.0f}"
+                        st.markdown("<div class='intraday-detail-title'>🧠 AI 分析</div>", unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class="intraday-detail-grid">
+                            <div class="intraday-detail-box"><div class="label">買進分</div><div class="value">{base_text}</div></div>
+                            <div class="intraday-detail-box"><div class="label">盤中動能</div><div class="value">{mom_text}</div></div>
+                            <div class="intraday-detail-box"><div class="label">反應分</div><div class="value">{reaction_text}</div></div>
+                            <div class="intraday-detail-box"><div class="label">盤中 AI</div><div class="value">{ai_text}</div></div>
+                            <div class="intraday-detail-box"><div class="label">成交金額</div><div class="value">{turnover_text}</div></div>
+                            <div class="intraday-detail-box"><div class="label">風險</div><div class="value">{risk}</div></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        st.markdown(f"**🎯 現在怎麼處理：{action}**")
+                        st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}　｜　昨日反應：{hot_signal}")
+                        st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
+                        _quote_time = str(r.get("報價時間", "") or "").strip()
+                        _quote_time_text = f"（交易所成交時間：{_quote_time}）" if _quote_time and _quote_time != "-" else "（此股目前無成交時間資料，價格可能是昨收）"
+                        st.markdown(f"**📈 現價：** {current_text} {_quote_time_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
+                        st.caption("💡 「交易所成交時間」是這個價格真正的最後成交時刻（來自交易所，不是我們抓取的時間）——如果這個時間長時間沒有往後跳，代表這檔股票本身這段時間沒有新成交，不是頁面沒有更新；如果連這個時間都很舊，先按「強制重抓」試一次看看。")
+                        st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
+                        if "🔴 不買" in str(formal_decision):
+                            st.info("盤後模型仍維持「不買」；盤中首頁的「等待買點」只代表今天值得重新觀察，不代表進場條件已成立。")
+                        elif "🟢 可買" in str(formal_decision):
+                            st.success("盤後模型已達正式進場門檻；仍請搭配風險與盤中狀態判斷，不把分數視為報酬保證。")
+                        if "🔥 反應強訊號" in str(hot_signal) and "🟢 可買" not in str(formal_decision):
+                            st.warning("👀 這檔股票出現「🔥 搶先關注」標籤，代表昨天跳空／爆量／收在高點的反應很強，AI 覺得值得先注意——但還沒有通過完整的正式買進條件檢查。建議做法：先觀察、先加進你的關注清單，不要因為看到這個標籤就急著買，等它也拿到「🟢 可買」再考慮進場，會比較穩。")
+
+                        plan = suggest_price_plan(r)
+                        if plan:
+                            st.markdown(render_price_plan_html(plan), unsafe_allow_html=True)
+                        else:
+                            st.caption("目前資料不足以算出進出場價參考（缺 ATR／波動度資料），建議先到「🔍 股票分析」查一次這檔股票。")
+
+                st.markdown("### 📋 一般模式")
+                simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "報價時間", "盤中 AI", "行動", "風險"] if c in live.columns]
                 st.dataframe(
-                    style_intraday_table(live[advanced_cols]), use_container_width=True, hide_index=True,
-                    column_config={"找飆股訊號": st.column_config.TextColumn("昨日反應訊號", width="medium",
-                                                                          help="🔥反應強訊號＝昨天跳空／爆量／收在高點反應很強；🟡醞釀中＝接近門檻；⚪不明顯＝沒有特別反應。")},
-                )
-                st.caption("原始「決策」保留盤後模型結論；「行動」只是盤中首頁的使用者語言翻譯。盤中 AI = 70% 最近盤後買進分 + 30% 盤中動能分。「反應分」是昨晚盤後就用單股回測同一套公式算好的分數，用來判斷要不要標上「🔥 反應強訊號」，盤中不會重算。")
-
-            st.markdown("### ⚡ 盤中起漲雷達")
-            radar_mode_used = st.session_state.get("intraday_scan_mode", DEFAULT_MODE)
-            st.caption(f"目前門檻：{radar_mode_used} 模式。反應分（昨晚盤後算好，與單股回測同公式）／爆量突破分／分時動能分／VWAP強弱／突破20日高／主力買盤強度（代理指標）綜合成「起漲雷達分」。")
-            if "起漲雷達分" in live.columns:
-                radar_view = live.sort_values("起漲雷達分", ascending=False)
-                radar_signal_only = st.checkbox("只看有訊號的股票（🟢起漲訊號／🟡醞釀中）", value=True, key="radar_signal_only")
-                if radar_signal_only and "雷達訊號" in radar_view.columns:
-                    radar_view = radar_view[radar_view["雷達訊號"] != "⚪ 不明顯"]
-                radar_cols = [c for c in [
-                    "股票代碼", "名稱", "即時價", "即時漲跌%", "起漲雷達分", "雷達訊號",
-                    "反應分", "找飆股訊號", "爆量突破分", "分時動能分", "VWAP強弱", "突破20日高", "主力買盤強度"
-                ] if c in radar_view.columns]
-                st.dataframe(
-                    radar_view[radar_cols].head(30), use_container_width=True, hide_index=True,
+                    live[simple_cols], use_container_width=True, hide_index=True,
                     column_config={
-                        "起漲雷達分": st.column_config.ProgressColumn("起漲雷達分", min_value=0, max_value=100, format="%.0f"),
-                        "即時漲跌%": st.column_config.NumberColumn("即時漲跌%", format="%.2f%%"),
-                        "反應分": st.column_config.ProgressColumn("反應分", min_value=0, max_value=100, format="%.0f"),
-                        "找飆股訊號": st.column_config.TextColumn("昨日反應訊號", width="medium",
-                                                                help="🔥反應強訊號＝昨天跳空／爆量／收在高點反應很強；🟡醞釀中＝接近門檻；⚪不明顯＝沒有特別反應。"),
+                        "排名": st.column_config.NumberColumn("排名", width="small"),
+                        "股票代碼": st.column_config.TextColumn("股票", width="small"),
+                        "名稱": st.column_config.TextColumn("名稱", width="medium"),
+                        "即時價": st.column_config.NumberColumn("現價", format="%.2f"),
+                        "報價時間": st.column_config.TextColumn("成交時間", width="small",
+                                                              help="交易所這筆報價真正的最後成交時刻；長時間沒跳動代表這檔股票本身沒有新成交，不是頁面沒更新。"),
+                        "盤中 AI": st.column_config.ProgressColumn("盤中 AI", min_value=0, max_value=100, format="%.0f"),
+                        "行動": st.column_config.TextColumn(
+                            "行動", width="medium",
+                            help="🟢可買＝正式買進訊號成立；🔥搶先關注＝昨天反應強、還沒過正式門檻；🟡等待買點＝接近但還沒到；🟠觀察＝先留意就好；🔴先跳過＝目前不建議進場。",
+                        ),
+                        "風險": st.column_config.TextColumn("風險", width="small"),
                     },
                 )
-                st.caption("盤中快照沒有分時明細與真實委託單資料，VWAP強弱、主力買盤強度是在此限制下的合理代理指標，不是交易所原始委買賣數據；「反應分」則是真實日K算出來的，可信度較高；僅供研究排序，不是進場保證。")
-        else:
-            st.info("尚未執行盤中掃描。按上方「🔍 掃描今日盤中機會」即可。")
+                st.caption("看不懂「行動」欄位？把滑鼠移到欄位標題上就有說明；簡單說：🟢可買 > 🔥搶先關注 > 🟡等待買點 > 🟠觀察 > 🔴先跳過，愈前面愈值得先看。")
 
-        if auto_refresh:
-            st.caption("⏱️ 自動更新已開啟，30 秒後會自動重新整理這頁並重抓最新報價…")
-            time.sleep(30)
-            st.rerun()
+                with st.expander("📊 進階：完整盤中資料", expanded=False):
+                    advanced_cols = [c for c in [
+                        "排名", "股票代碼", "名稱", "即時價", "即時漲跌%", "成交金額",
+                        "基準買進分", "盤中動能分", "盤中 AI", "AI變化", "行動", "盤中變化",
+                        "決策", "風險", "狀態", "資料品質", "近1日漲跌%", "近5日漲跌%", "近20日漲跌%",
+                        "優先級", "量比", "趨勢", "說明", "反應分", "找飆股訊號", "跳空%", "反應量比",
+                    ] if c in live.columns]
+                    st.dataframe(
+                        style_intraday_table(live[advanced_cols]), use_container_width=True, hide_index=True,
+                        column_config={"找飆股訊號": st.column_config.TextColumn("昨日反應訊號", width="medium",
+                                                                              help="🔥反應強訊號＝昨天跳空／爆量／收在高點反應很強；🟡醞釀中＝接近門檻；⚪不明顯＝沒有特別反應。")},
+                    )
+                    st.caption("原始「決策」保留盤後模型結論；「行動」只是盤中首頁的使用者語言翻譯。盤中 AI = 70% 最近盤後買進分 + 30% 盤中動能分。「反應分」是昨晚盤後就用單股回測同一套公式算好的分數，用來判斷要不要標上「🔥 反應強訊號」，盤中不會重算。")
+
+                st.markdown("### ⚡ 盤中起漲雷達")
+                radar_mode_used = st.session_state.get("intraday_scan_mode", DEFAULT_MODE)
+                st.caption(f"目前門檻：{radar_mode_used} 模式。反應分（昨晚盤後算好，與單股回測同公式）／爆量突破分／分時動能分／VWAP強弱／突破20日高／主力買盤強度（代理指標）綜合成「起漲雷達分」。")
+                if "起漲雷達分" in live.columns:
+                    radar_view = live.sort_values("起漲雷達分", ascending=False)
+                    radar_signal_only = st.checkbox("只看有訊號的股票（🟢起漲訊號／🟡醞釀中）", value=True, key="radar_signal_only")
+                    if radar_signal_only and "雷達訊號" in radar_view.columns:
+                        radar_view = radar_view[radar_view["雷達訊號"] != "⚪ 不明顯"]
+                    radar_cols = [c for c in [
+                        "股票代碼", "名稱", "即時價", "即時漲跌%", "起漲雷達分", "雷達訊號",
+                        "反應分", "找飆股訊號", "爆量突破分", "分時動能分", "VWAP強弱", "突破20日高", "主力買盤強度"
+                    ] if c in radar_view.columns]
+                    st.dataframe(
+                        radar_view[radar_cols].head(30), use_container_width=True, hide_index=True,
+                        column_config={
+                            "起漲雷達分": st.column_config.ProgressColumn("起漲雷達分", min_value=0, max_value=100, format="%.0f"),
+                            "即時漲跌%": st.column_config.NumberColumn("即時漲跌%", format="%.2f%%"),
+                            "反應分": st.column_config.ProgressColumn("反應分", min_value=0, max_value=100, format="%.0f"),
+                            "找飆股訊號": st.column_config.TextColumn("昨日反應訊號", width="medium",
+                                                                    help="🔥反應強訊號＝昨天跳空／爆量／收在高點反應很強；🟡醞釀中＝接近門檻；⚪不明顯＝沒有特別反應。"),
+                        },
+                    )
+                    st.caption("盤中快照沒有分時明細與真實委託單資料，VWAP強弱、主力買盤強度是在此限制下的合理代理指標，不是交易所原始委買賣數據；「反應分」則是真實日K算出來的，可信度較高；僅供研究排序，不是進場保證。")
+            else:
+                st.info("尚未執行盤中掃描。按上方「🔍 掃描今日盤中機會」即可。")
+
+            if auto_refresh and not _HAS_ST_FRAGMENT:
+                # 只有偵測不到 st.fragment（舊版 Streamlit）時才退回會卡頁面的舊機制；
+                # 有 st.fragment 時完全靠 decorator 的 run_every 背景刷新，不需要 sleep。
+                st.caption("⏱️ 自動更新已開啟（舊版相容模式），30 秒後會自動重新整理這頁並重抓最新報價…")
+                time.sleep(30)
+                st.rerun()
+
+        render_intraday_scan_section()
 
 # --- TAB：盤後深度掃描 ---
 with tab_eod:
