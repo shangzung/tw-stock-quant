@@ -933,6 +933,7 @@ st.markdown("""
     .ip-change { background:rgba(10,132,255,.12); color:#7abaff; }
     .ip-delta { margin-top:10px; font-size:12px; color:var(--text-sub); font-variant-numeric:tabular-nums; }
     .ip-reason { margin-top:8px; font-size:12px; color:var(--text-sub); line-height:1.5; }
+    .ip-quote-time { font-size:11px; color:var(--text-sub); }
     .ip-price { margin-top:8px; font-size:12px; color:var(--text-sub); }
     .intraday-detail-title { font-size:15px; font-weight:800; }
     .intraday-detail-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:8px 0 10px; }
@@ -1691,6 +1692,26 @@ def _mis_warm_session():
     return s
 
 
+# V12.2：MIS 對「這個 session 第一次查某些代碼」跟「已經查過幾次的代碼」，實務上
+# 回傳的完整度不太一樣——同一個 session 持續對同一批代碼查詢個幾輪，資料通常會愈補愈完整；
+# 每次掃描都重新建立一個全新 session/cookie，等於每 30 秒都在對交易所重新做『第一次查詢』，
+# 這正是某些股票的即時價一直卡在昨收、遲遲補不上的常見原因。
+# 這裡改成整個 process 共用同一個 session，只有在真的失敗或超過存活時間才重建。
+_MIS_SESSION_CACHE = {"session": None, "created_at": 0.0}
+_MIS_SESSION_MAX_AGE_SEC = 600  # 同一個 session 最多重複使用 10 分鐘，避免 cookie 過期後一直失敗
+
+
+def _get_or_create_mis_session(force_new=False):
+    now = time.time()
+    cached = _MIS_SESSION_CACHE.get("session")
+    age = now - _MIS_SESSION_CACHE.get("created_at", 0.0)
+    if force_new or cached is None or age > _MIS_SESSION_MAX_AGE_SEC:
+        cached = _mis_warm_session()
+        _MIS_SESSION_CACHE["session"] = cached
+        _MIS_SESSION_CACHE["created_at"] = now
+    return cached
+
+
 def _fetch_mis_batch(session, ex_ch_codes):
     """回傳 (msgArray, hard_fail)。hard_fail=True 代表明顯是連線層級被擋
     （逾時／連線被拒／403／429／回應不是 JSON），這種情況重試整批市場也不會變好。"""
@@ -1765,14 +1786,18 @@ def _get_intraday_snapshot_via_mis():
     if not ex_ch_all:
         return pd.DataFrame()
 
-    session = _mis_warm_session()
+    session = _get_or_create_mis_session()
     batches = [ex_ch_all[i:i + MIS_BATCH_SIZE] for i in range(0, len(ex_ch_all), MIS_BATCH_SIZE)]
 
     rows = []
     probe_rows, probe_hard_fail = _fetch_mis_batch(session, batches[0])
     if probe_hard_fail:
-        # 第一批就明顯被擋，判定整個環境連不上，立刻放棄改走備援，不要逐批硬試
-        return pd.DataFrame()
+        # 目前這個 session 可能已經失效，換一個全新 session 再探一次；
+        # 如果換了 session 還是一樣被擋，才判定整個環境連不上，放棄改走備援。
+        session = _get_or_create_mis_session(force_new=True)
+        probe_rows, probe_hard_fail = _fetch_mis_batch(session, batches[0])
+        if probe_hard_fail:
+            return pd.DataFrame()
     rows.extend(probe_rows)
 
     start_ts = time.time()
@@ -1819,6 +1844,11 @@ def _get_intraday_snapshot_via_mis():
     out["成交金額"] = (price.values * out["成交量"].values).round(0)
     if "d" in raw.columns:
         out["資料日期"] = raw["d"].astype(str).values
+    if "t" in raw.columns:
+        # MIS 回傳的「t」是這筆報價本身的成交時間（HH:MM:SS），是判斷「這個價格到底新不新」
+        # 最可靠的依據——比「我們幾點鐘呼叫 API」更準，因為冷門股本來就可能好幾分鐘沒成交，
+        # 這種情況下 t 停在原地是正常現象，不代表程式沒有重新抓取。
+        out["報價時間"] = raw["t"].astype(str).values
     out["來源"] = "MIS"
     out = out.dropna(subset=["即時價"]).drop_duplicates("股票代碼", keep="first").reset_index(drop=True)
     return out
@@ -3910,6 +3940,8 @@ with tab_intraday:
                 price = safe_float(r.get("即時價"), np.nan)
                 pct = safe_float(r.get("即時漲跌%"), np.nan)
                 pct_cls = "tw-up" if pct > 0 else "tw-down" if pct < 0 else "tw-flat"
+                quote_time = str(r.get("報價時間", "") or "").strip()
+                quote_time_html = f"　<span class='ip-quote-time'>成交 {html.escape(quote_time)}</span>" if quote_time and quote_time != "-" else ""
 
                 # Escape dataframe text so a stock name/reason can never break the HTML block.
                 code = html.escape(str(r.get("股票代碼", "")))
@@ -3929,7 +3961,7 @@ with tab_intraday:
                     f'<span class="ip-risk {risk_cls}">{risk_safe}</span>'
                     f'<span class="ip-change">{change_safe}</span></div>'
                     f'<div class="ip-delta">{delta_html}</div>'
-                    f'<div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span></div>'
+                    f'<div class="ip-price">現價 {price:.2f}　<span class="{pct_cls}">{pct:+.1f}%</span>{quote_time_html}</div>'
                     f'<div class="ip-reason">{reason_safe}</div>'
                     f'</div>'
                 )
@@ -3981,7 +4013,10 @@ with tab_intraday:
                     st.markdown(f"**🎯 現在怎麼處理：{action}**")
                     st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}　｜　昨日反應：{hot_signal}")
                     st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
-                    st.markdown(f"**📈 現價：** {current_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
+                    _quote_time = str(r.get("報價時間", "") or "").strip()
+                    _quote_time_text = f"（交易所成交時間：{_quote_time}）" if _quote_time and _quote_time != "-" else "（此股目前無成交時間資料，價格可能是昨收）"
+                    st.markdown(f"**📈 現價：** {current_text} {_quote_time_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
+                    st.caption("💡 「交易所成交時間」是這個價格真正的最後成交時刻（來自交易所，不是我們抓取的時間）——如果這個時間長時間沒有往後跳，代表這檔股票本身這段時間沒有新成交，不是頁面沒有更新；如果連這個時間都很舊，先按「強制重抓」試一次看看。")
                     st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
                     if "🔴 不買" in str(formal_decision):
                         st.info("盤後模型仍維持「不買」；盤中首頁的「等待買點」只代表今天值得重新觀察，不代表進場條件已成立。")
@@ -3997,7 +4032,7 @@ with tab_intraday:
                         st.caption("目前資料不足以算出進出場價參考（缺 ATR／波動度資料），建議先到「🔍 股票分析」查一次這檔股票。")
 
             st.markdown("### 📋 一般模式")
-            simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "盤中 AI", "行動", "風險"] if c in live.columns]
+            simple_cols = [c for c in ["排名", "股票代碼", "名稱", "即時價", "報價時間", "盤中 AI", "行動", "風險"] if c in live.columns]
             st.dataframe(
                 live[simple_cols], use_container_width=True, hide_index=True,
                 column_config={
@@ -4005,6 +4040,8 @@ with tab_intraday:
                     "股票代碼": st.column_config.TextColumn("股票", width="small"),
                     "名稱": st.column_config.TextColumn("名稱", width="medium"),
                     "即時價": st.column_config.NumberColumn("現價", format="%.2f"),
+                    "報價時間": st.column_config.TextColumn("成交時間", width="small",
+                                                          help="交易所這筆報價真正的最後成交時刻；長時間沒跳動代表這檔股票本身沒有新成交，不是頁面沒更新。"),
                     "盤中 AI": st.column_config.ProgressColumn("盤中 AI", min_value=0, max_value=100, format="%.0f"),
                     "行動": st.column_config.TextColumn(
                         "行動", width="medium",
