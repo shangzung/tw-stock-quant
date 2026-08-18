@@ -4186,7 +4186,9 @@ with tab_eod:
       <div class="terminal-card"><div class="tc-label">DATA POLICY</div><div class="tc-value">PIT</div><div class="tc-sub">歷史訊號不使用未來日期資料</div></div>
     </div>
     """, unsafe_allow_html=True)
-    st.caption("盤後深度模式：完整更新研究資料，產生明日觀察名單。先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。")
+    st.caption("盤後深度模式：完整更新研究資料，產生明日觀察名單。先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。"
+               "「盤後」指的是分析用的資料等級（最近一個已收盤交易日的完整資料），不是限制你只能收盤後才能按——"
+               "你隨時按「執行盤後深度掃描」都可以，畫面上一律會寫「盤後深度掃描結果」，這是固定名稱，跟你按下去當下是盤中還是已收盤無關。")
 
     universe_df = get_stock_universe()
     if universe_df.empty:
@@ -4234,7 +4236,8 @@ with tab_eod:
         else:
             st.caption(f"（預估約 {est_calls} 次 API；完整分析採批次抓取，Token 消耗比舊版大幅降低。）")
 
-        if st.button("🌙 執行盤後深度掃描", type="primary"):
+        if st.button("🌙 執行盤後深度掃描", type="primary",
+                     help="任何時間都可以按，包含盤中；「盤後」指用的是最近一個已收盤交易日的完整資料，不是限制執行時間。"):
             scan_list = build_scan_list(uni, strength_choice)
             pre_rows = []
             with st.status(f"🔎 正在執行市場掃描… 0/{len(scan_list)}", expanded=False) as scan_status:
@@ -4324,8 +4327,16 @@ with tab_eod:
             top5_df = _cur_scan.get("top5")
             _saved_at = _cur_scan.get("saved_at")
             if _saved_at:
+                _now_in_market = is_tw_market_hours()
+                _timing_note = (
+                    "你剛剛是在盤中按的——這裡的「盤後」不是說時間點，是說資料等級：用的是最近一個『已收盤』交易日的完整資料，"
+                    "不會隨盤中報價跳動；下面卡片上的「現價」也是這份收盤資料裡的價格，不是即時報價。"
+                    if _now_in_market else
+                    "現在是非交易時段，這份結果就是名副其實的『盤後』資料。"
+                )
                 st.caption(f"🕓 目前顯示的是【{eod_mode_choice}】{_saved_at} 的盤後深度掃描結果（重開 App 也不會消失；"
-                           f"按「執行盤後深度掃描」只會更新目前選到的這個模式，另一個模式的結果不會被洗掉）。")
+                           f"按「執行盤後深度掃描」只會更新目前選到的這個模式，另一個模式的結果不會被洗掉）。"
+                           f" {_timing_note}")
 
             if top5_df is not None and not top5_df.empty:
                 st.subheader("🔥 明日最值得看")
