@@ -166,7 +166,7 @@ def build_forward_calibration(log_df, max_samples=500, forward_days=(5, 10, 20))
     for bucket in ["<60", "60–64", "65–69", "70–74", "75–79", "80–84", "85–89", "90+"]:
         g = detail[detail["分數區間"] == bucket]
         if g.empty: continue
-        rec = {"分數區間": bucket, "樣本數": len(g)}
+        rec = {"分數區間": bucket, "樣本數": len(g), "不重複個股數": int(g["股票代碼"].nunique())}
         for n in forward_days:
             v = pd.to_numeric(g[f"{n}D報酬"], errors="coerce").dropna()
             rec[f"{n}D勝率"] = float((v > 0).mean() * 100) if len(v) else np.nan
@@ -217,6 +217,32 @@ def calibration_pending_note(detail):
         "例如 5D 報酬要等訊號發出後、市場真的走完 5 個交易日才算得出來，10D／20D 同理，訊號越新就越常出現 None。"
         f"目前 {parts} 有結果，其餘會隨著交易日過去自動補上，不需要手動操作。"
     )
+
+
+def render_calibration_detail_drilldown(detail, key_prefix):
+    """讓使用者展開看「樣本數」到底是哪些個股、哪一天的訊號——
+    樣本數＝訊號次數（股票代碼＋訊號日），不是不重複個股數，同一檔股票在不同天各自算一筆。"""
+    if detail is None or detail.empty:
+        return
+    with st.expander(f"🔍 查看每一筆樣本明細（共 {len(detail):,} 筆，可依股票代碼搜尋）", expanded=False):
+        st.caption("「樣本數」＝訊號次數（股票代碼＋訊號日的組合），不是不重複個股數；同一檔股票在不同天各出現一次訊號，就算不同的樣本。"
+                   "上面表格另外多了「不重複個股數」欄，才是真正有幾檔不同股票。")
+        buckets = ["<60", "60–64", "65–69", "70–74", "75–79", "80–84", "85–89", "90+"]
+        avail = [b for b in buckets if b in detail["分數區間"].unique()]
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            pick = st.selectbox("篩選分數區間", ["全部"] + avail, key=f"{key_prefix}_bucket_filter")
+        with c2:
+            sid_filter = st.text_input("篩選股票代碼（可留空）", key=f"{key_prefix}_sid_filter")
+        show = detail if pick == "全部" else detail[detail["分數區間"] == pick]
+        if sid_filter:
+            show = show[show["股票代碼"].astype(str).str.contains(sid_filter.strip(), na=False)]
+        cols = [c for c in ["股票代碼", "訊號日", "分數區間", "買進分", "5D報酬", "10D報酬", "20D報酬", "市場環境", "風險"] if c in show.columns]
+        if show.empty:
+            st.caption("這個篩選條件下沒有樣本。")
+        else:
+            st.dataframe(show[cols].sort_values("訊號日", ascending=False).round(3),
+                         use_container_width=True, hide_index=True)
 
 
 def calibration_reliability(n):
@@ -4695,6 +4721,7 @@ with tab_verify:
             _pending_note = calibration_pending_note(detail)
             if _pending_note:
                 st.caption(_pending_note)
+            render_calibration_detail_drilldown(detail, key_prefix="verify")
 
 with tab_advanced:
     st.warning("⚠️ 研究用途：以下工具提供給量化研究與策略驗證使用。一般投資決策不需要操作。AI戰績已自動更新，無需在此建立校準。")
@@ -5060,6 +5087,7 @@ with tab_advanced:
                 _pending_note = calibration_pending_note(detail)
                 if _pending_note:
                     st.caption(_pending_note)
+                render_calibration_detail_drilldown(detail, key_prefix="advanced")
                 if "10D平均報酬" in cal.columns:
                     eligible = cal[cal["樣本數"] >= max(10, int(total * 0.03))]
                     if not eligible.empty:
