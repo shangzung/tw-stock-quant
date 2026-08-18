@@ -1619,47 +1619,107 @@ def _normalize_intraday_frame(df, source):
 # =========================
 MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 MIS_WARMUP_URL = "https://mis.twse.com.tw/stock/index.jsp"
-MIS_BATCH_SIZE = 100
+MIS_BATCH_SIZE = 50  # V12.1：從 100 調降為 50，避免 URL 過長／單批被判定異常而整批被拒
+MIS_MAX_RETRY = 2    # 每一批最多重試次數（含第一次）
+
+# V12.1：記錄「這次到底發生什麼」，讓「API 診斷」面板可以顯示比 Exception 訊息更有用的資訊
+# （例如 HTTP 狀態碼、rtcode、回應是不是根本不是 JSON——這些通常代表交易所把這台主機的
+#  IP 直接擋掉，而不是程式邏輯錯，這種情況重試也沒用，要換一個有台灣對外連線的環境部署）。
+_MIS_LAST_DIAGNOSIS = {"ts": None, "detail": ""}
 
 
 def _mis_prefix(market_type):
     return "otc" if str(market_type).strip().lower() == "tpex" else "tse"
 
 
-def _mis_warm_session():
-    """MIS 沒有先建立 session cookie 常常會被視為異常連線、拿不到資料，
-    所以先打一次首頁熱身，拿到 cookie 後才開始真正查詢。"""
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+def _mis_session_headers():
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://mis.twse.com.tw/stock/index.jsp",
-        "Accept": "application/json",
-    })
+        "Origin": "https://mis.twse.com.tw",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive",
+    }
+
+
+def _mis_warm_session():
+    """MIS 沒有先建立 session cookie 常常會被視為異常連線、拿不到資料。
+    正確流程是：先打首頁拿基本 cookie，再對 API 本身打一次『空查詢』，
+    MIS 才會真正核發可用的查詢 session；只熱身首頁、不熱身 API 端點，
+    第一批真實查詢常常仍然被判定成沒有 session 而回空陣列。"""
+    s = requests.Session()
+    s.headers.update(_mis_session_headers())
     try:
         s.get(MIS_WARMUP_URL, timeout=8)
+    except Exception:
+        pass
+    try:
+        # 空查詢：只是為了讓 MIS 核發 session cookie，回什麼內容不重要
+        s.get(MIS_STOCK_INFO_URL, params={"ex_ch": "", "json": "1", "delay": "0"}, timeout=8)
+        time.sleep(0.3)  # session 生效需要一點時間，太快接著查會拿到同樣的空結果
     except Exception:
         pass
     return s
 
 
 def _fetch_mis_batch(session, ex_ch_codes):
-    try:
-        r = session.get(
-            MIS_STOCK_INFO_URL,
-            params={
-                "ex_ch": "|".join(ex_ch_codes),
-                "json": "1",
-                "delay": "0",
-                "_": str(int(time.time() * 1000)),
-            },
-            timeout=12,
-        )
-        r.raise_for_status()
-        payload = r.json()
-        return payload.get("msgArray", []) if isinstance(payload, dict) else []
-    except Exception as e:
-        _log_api_error("MIS getStockInfo", ex_ch_codes[0] if ex_ch_codes else "-", e)
-        return []
+    last_exc = None
+    for attempt in range(MIS_MAX_RETRY):
+        try:
+            r = session.get(
+                MIS_STOCK_INFO_URL,
+                params={
+                    "ex_ch": "|".join(ex_ch_codes),
+                    "json": "1",
+                    "delay": "0",
+                    "_": str(int(time.time() * 1000)),
+                },
+                timeout=12,
+            )
+            status = r.status_code
+            if status != 200:
+                _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
+                                            detail=f"HTTP {status}（交易所拒絕或封鎖此主機的連線，重試通常無效）")
+                last_exc = ValueError(f"HTTP {status}")
+                # 403/429 等明確被擋的狀況，重試也沒意義，直接跳出換下一批
+                if status in (403, 429):
+                    break
+                time.sleep(0.5 * (attempt + 1))
+                session = _mis_warm_session()
+                continue
+            try:
+                payload = r.json()
+            except Exception:
+                snippet = (r.text or "")[:120].replace("\n", " ")
+                _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
+                                            detail=f"回應不是 JSON（可能被導向驗證頁或遭封鎖）：{snippet}")
+                last_exc = ValueError("回應不是合法 JSON，可能是連線被擋或需要人機驗證")
+                session = _mis_warm_session()
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            if not isinstance(payload, dict):
+                last_exc = ValueError("回應格式異常（非物件）")
+                continue
+            rtcode = str(payload.get("rtcode", ""))
+            msg_array = payload.get("msgArray", [])
+            if rtcode not in ("", "0000") and not msg_array:
+                # rtcode 常見：5001 = 查詢 session 不存在/過期，重新熱身後再試一次
+                _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
+                                            detail=f"rtcode={rtcode}，rtmessage={payload.get('rtmessage','')}")
+                last_exc = ValueError(f"MIS rtcode={rtcode} {payload.get('rtmessage','')}")
+                session = _mis_warm_session()
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            return msg_array
+        except Exception as e:
+            last_exc = e
+            _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"), detail=f"{type(e).__name__}: {e}")
+            time.sleep(0.5 * (attempt + 1))
+            session = _mis_warm_session()
+    _log_api_error("MIS getStockInfo", ex_ch_codes[0] if ex_ch_codes else "-", last_exc or ValueError("未知錯誤"))
+    return []
 
 
 def _get_intraday_snapshot_via_mis():
@@ -3380,6 +3440,7 @@ def render_settings_tab():
             ("法人買賣", lambda: get_institutional("2330", 60)),
             ("Yahoo 大盤", lambda: get_yahoo_taiex()),
             ("交易所今日快照(免額度)", lambda: get_market_snapshot()),
+            ("MIS 即時報價(盤中主要來源)", lambda: _get_intraday_snapshot_via_mis()),
         ]
         for label, fn in checks:
             try:
@@ -3390,6 +3451,15 @@ def render_settings_tab():
                     st.warning(f"⚠️ {label}：連線成功但回傳空資料 (可能是額度用完或代碼問題)")
             except Exception as e:
                 st.error(f"❌ {label}：{type(e).__name__}: {e}")
+        if _MIS_LAST_DIAGNOSIS.get("detail"):
+            st.info(
+                f"🩺 MIS 最近一次失敗細節（{_MIS_LAST_DIAGNOSIS.get('ts','-')}）："
+                f"{_MIS_LAST_DIAGNOSIS['detail']}\n\n"
+                "若這裡持續出現 HTTP 403 / 429，或「回應不是 JSON」，代表目前這台主機的對外 IP "
+                "被交易所判定為異常來源、整批直接拒絕，跟按鈕、快取、開盤時間都無關，重試也不會好——"
+                "常見於部署在海外機房的雲端主機（例如國外的 Streamlit Cloud / Render 等）。"
+                "遇到這種情況，本機執行、換一台位於台灣（或走台灣對外線路）的主機部署，通常就能恢復。"
+            )
 
     _flush_api_errors()
     if st.session_state["api_errors"]:
@@ -3715,9 +3785,14 @@ with tab_intraday:
                         # 只有在 MIS 真即時來源整批失敗、退回舊版『每日收盤行情』備援時才會出現，
                         # 明確提醒使用者這一次抓到的不是即時資料。
                         if "來源" in live.columns and live["來源"].astype(str).str.contains("EOD_FALLBACK", na=False).any():
+                            _diag = _MIS_LAST_DIAGNOSIS.get("detail") or ""
+                            _diag_txt = f"（偵測到的原因：{_diag}）" if _diag else ""
                             st.session_state["intraday_scan_fallback_warning"] = (
                                 "⚠️ 這次即時報價來源（MIS）連線失敗，已自動退回交易所『每日收盤行情』備援，"
                                 "畫面上的價格可能不是這一刻的即時價，建議稍後按「強制重抓」再試一次。"
+                                f"{_diag_txt} 若這個原因持續出現 HTTP 403 / 429 或「回應不是 JSON」，"
+                                "通常代表目前部署主機的對外 IP 被交易所判定為異常來源並直接擋掉，"
+                                "跟按鈕或快取無關，重試也不會好，需要換一個能正常連上 mis.twse.com.tw 的主機/地區部署。"
                             )
                         else:
                             st.session_state["intraday_scan_fallback_warning"] = None
