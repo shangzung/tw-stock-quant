@@ -18,6 +18,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -59,6 +60,17 @@ HOLDINGS_FILE = CACHE_DIR / "holdings.json"
 # V11.2：找飆股候選快取（盤後算好、盤中直接讀，不在盤中重算 same_day_reaction_score）
 HOT_STOCK_CACHE_FILE = CACHE_DIR / "hot_stock_scan.pkl"
 
+# V12.3：伺服器所在主機的系統時區不一定是台北時間（例如雲端部署常見是 UTC），
+# 若畫面上顯示「掃描時間」時直接用 datetime.now()，會拿到主機的時區而不是台灣時間，
+# 導致「明明剛掃描完，畫面卻顯示幾小時前」的錯覺。所有要顯示給使用者看的「現在/掃描時間」
+# 一律呼叫這個 now_tw()，不要再直接用 datetime.now()。
+TW_TZ = ZoneInfo("Asia/Taipei")
+
+
+def now_tw():
+    """回傳台北時區（Asia/Taipei）的目前時間，用於所有畫面上顯示的『掃描時間』。"""
+    return datetime.now(TW_TZ)
+
 
 
 
@@ -74,7 +86,7 @@ def append_research_snapshot(df, saved_at=None, market_regime=None, market_score
     if df is None or df.empty:
         return False
     try:
-        ts = saved_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = saved_at or now_tw().strftime("%Y-%m-%d %H:%M:%S")
         keep = ["股票代碼", "名稱", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "現價", "日期"]
         rows = []
         for _, r in df.iterrows():
@@ -356,7 +368,7 @@ def save_hot_stock_scan(df, mode=None):
     try:
         _mode = mode or "平衡"
         all_hot = load_hot_stock_scan_all()
-        all_hot[_mode] = {"out": df, "mode": _mode, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        all_hot[_mode] = {"out": df, "mode": _mode, "saved_at": now_tw().strftime("%Y-%m-%d %H:%M:%S")}
         pd.to_pickle(all_hot, HOT_STOCK_CACHE_FILE)
         return True
     except Exception:
@@ -1221,7 +1233,7 @@ _API_ERROR_BUFFER = []
 def _log_api_error(api_name, stock_id, exc):
     """Thread-safe error collector. Worker threads never mutate Streamlit session state directly."""
     item = {
-        "time": datetime.now().strftime("%H:%M:%S"),
+        "time": now_tw().strftime("%H:%M:%S"),
         "api": api_name,
         "stock_id": stock_id,
         "error": f"{type(exc).__name__}: {exc}"
@@ -1794,7 +1806,7 @@ def _fetch_mis_batch(session, ex_ch_codes):
             )
             status = r.status_code
             if status != 200:
-                _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
+                _MIS_LAST_DIAGNOSIS.update(ts=now_tw().strftime("%H:%M:%S"),
                                             detail=f"HTTP {status}（交易所拒絕或封鎖此主機的連線，重試通常無效）")
                 last_exc = ValueError(f"HTTP {status}")
                 hard_fail = status in (403, 429)
@@ -1805,7 +1817,7 @@ def _fetch_mis_batch(session, ex_ch_codes):
                 payload = r.json()
             except Exception:
                 snippet = (r.text or "")[:120].replace("\n", " ")
-                _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
+                _MIS_LAST_DIAGNOSIS.update(ts=now_tw().strftime("%H:%M:%S"),
                                             detail=f"回應不是 JSON（可能被導向驗證頁或遭封鎖）：{snippet}")
                 last_exc = ValueError("回應不是合法 JSON，可能是連線被擋或需要人機驗證")
                 hard_fail = True
@@ -1816,7 +1828,7 @@ def _fetch_mis_batch(session, ex_ch_codes):
             rtcode = str(payload.get("rtcode", ""))
             msg_array = payload.get("msgArray", [])
             if rtcode not in ("", "0000") and not msg_array:
-                _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"),
+                _MIS_LAST_DIAGNOSIS.update(ts=now_tw().strftime("%H:%M:%S"),
                                             detail=f"rtcode={rtcode}，rtmessage={payload.get('rtmessage','')}")
                 last_exc = ValueError(f"MIS rtcode={rtcode} {payload.get('rtmessage','')}")
                 continue
@@ -1824,7 +1836,7 @@ def _fetch_mis_batch(session, ex_ch_codes):
         except Exception as e:
             last_exc = e
             msg = f"{type(e).__name__}: {e}"
-            _MIS_LAST_DIAGNOSIS.update(ts=datetime.now().strftime("%H:%M:%S"), detail=msg)
+            _MIS_LAST_DIAGNOSIS.update(ts=now_tw().strftime("%H:%M:%S"), detail=msg)
             if any(k in msg.lower() for k in MIS_PROBE_TIMEOUT_HINT):
                 hard_fail = True
                 break
@@ -2342,7 +2354,7 @@ def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
 
 def save_intraday_scan(df):
     try:
-        pd.to_pickle({"out": df, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, INTRADAY_SCAN_CACHE_FILE)
+        pd.to_pickle({"out": df, "saved_at": now_tw().strftime("%Y-%m-%d %H:%M:%S")}, INTRADAY_SCAN_CACHE_FILE)
     except Exception: pass
 
 def load_intraday_scan():
@@ -3966,7 +3978,7 @@ with tab_intraday:
                         live = run_intraday_scan(u, top_n=30, mode=intraday_mode)
                         save_intraday_scan(live)
                         st.session_state["intraday_scan_out"] = live
-                        st.session_state["intraday_scan_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.session_state["intraday_scan_saved_at"] = now_tw().strftime("%Y-%m-%d %H:%M:%S")
                         st.session_state["intraday_scan_mode"] = intraday_mode
                         if isinstance(live, pd.DataFrame) and not live.empty and "即時漲跌%" in live.columns:
                             _avg_pct = safe_float(pd.to_numeric(live["即時漲跌%"], errors="coerce").mean())
@@ -4324,7 +4336,7 @@ with tab_eod:
                         # 依模式分開存進 session state，不會把另一個模式（穩健／積極）的結果洗掉。
                         st.session_state["hot_stock_by_mode"] = dict(st.session_state.get("hot_stock_by_mode") or {})
                         st.session_state["hot_stock_by_mode"][eod_mode] = {
-                            "out": hot_out, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "out": hot_out, "saved_at": now_tw().strftime("%Y-%m-%d %H:%M:%S"),
                         }
                     except Exception as exc:
                         _log_api_error("run_hot_stock_scan", "-", exc)
@@ -4334,7 +4346,7 @@ with tab_eod:
                             try:
                                 sources = batch_sources.get(sid, {})
                                 if not sources.get("daily", pd.DataFrame()).empty:
-                                    result = calculate_stock_snapshot(sid, pd.Timestamp(datetime.now().date()), sources, regime, mode=eod_mode)
+                                    result = calculate_stock_snapshot(sid, pd.Timestamp(now_tw().date()), sources, regime, mode=eod_mode)
                                 else:
                                     result = None
                                 if result:
@@ -4351,7 +4363,7 @@ with tab_eod:
                         name_map = universe_df.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in universe_df.columns else {}
                         out.insert(1, "名稱", out["股票代碼"].map(name_map).fillna(""))
                         candidates = out[out["決策"].isin(["🟢 可買"])]
-                        _saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        _saved_at = now_tw().strftime("%Y-%m-%d %H:%M:%S")
                         _payload = {"out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at}
 
                         # 依模式（穩健／積極）分開存進 session state，兩邊互不覆蓋——
