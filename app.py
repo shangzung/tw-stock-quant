@@ -2003,6 +2003,67 @@ def get_intraday_market_snapshot():
         if c not in out: out[c] = np.nan
     return out
 
+
+# =========================
+# V12.5：大盤指數即時報價（加權指數／櫃買指數）——很多人會想要「跟證券商 App 一樣
+# 看得到指數」，這邊直接沿用個股即時報價那一整套 MIS session／重試／診斷邏輯，
+# 不是另外接一個新資料源，所以連線成功率、失敗原因都跟個股即時報價一致。
+# =========================
+INDEX_MIS_CODES = {"加權指數": "tse_t00.tw", "櫃買指數": "otc_o00.tw"}
+_INDEX_MIS_CODE_TO_LABEL = {v.split("_", 1)[1].split(".")[0]: k for k, v in INDEX_MIS_CODES.items()}
+
+
+def _get_index_snapshot_via_mis():
+    """即時大盤指數快照：只有兩筆（加權／櫃買），一批打完，不需要分批。
+    沿用個股共用的 session；第一次失敗就強制換一個新 session 再試一次，
+    跟個股那邊『探針失敗就換 session』的邏輯一致。"""
+    session = _get_or_create_mis_session()
+    ex_ch_codes = list(INDEX_MIS_CODES.values())
+    rows, hard_fail = _fetch_mis_batch(session, ex_ch_codes)
+    if (hard_fail or not rows):
+        session = _get_or_create_mis_session(force_new=True)
+        rows, hard_fail = _fetch_mis_batch(session, ex_ch_codes)
+    if not rows:
+        return {}
+
+    def _parse_num(v):
+        if v is None:
+            return np.nan
+        s = str(v).strip().replace(",", "")
+        if not s or s == "-":
+            return np.nan
+        try:
+            return float(s.split("_")[0])
+        except (ValueError, TypeError):
+            return np.nan
+
+    out = {}
+    for r in rows:
+        label = _INDEX_MIS_CODE_TO_LABEL.get(str(r.get("c", "")).strip())
+        if label is None:
+            continue
+        value = _parse_num(r.get("z"))
+        prev = _parse_num(r.get("y"))
+        if np.isnan(value):
+            continue
+        change = value - prev if not np.isnan(prev) else np.nan
+        pct = (change / prev * 100) if (not np.isnan(prev) and prev != 0) else np.nan
+        out[label] = {"value": value, "change": change, "pct": pct,
+                       "time": str(r.get("t", "")).strip(), "source": "MIS"}
+    return out
+
+
+@st.cache_data(ttl=INTRADAY_CACHE_TTL, show_spinner=False)
+def get_live_index_snapshot():
+    """快取版本：跟個股即時報價用同一個 15 秒節奏。MIS 失敗時回傳空 dict，
+    上層會自動退回 Yahoo 每日收盤價當備援，不會讓整頁報錯或空白。"""
+    try:
+        return _get_index_snapshot_via_mis()
+    except Exception as e:
+        _log_api_error("MIS index snapshot", "-", e)
+        return {}
+
+
 # =========================
 # V11.0 ⚡ 盤中起漲雷達：五個盤中子分數
 # 交易所盤中快照只提供「即時價／漲跌／成交量／成交金額」單一時點快照，沒有分時明細、
@@ -3510,6 +3571,24 @@ for _k, _v in _settings_defaults.items():
 regime = market_regime()
 st.sidebar.divider()
 _regime_class = regime.get("regime", "UNKNOWN")
+try:
+    _live_idx = get_live_index_snapshot()
+except Exception:
+    _live_idx = {}
+_idx_lines = ""
+for _idx_name in ["加權指數", "櫃買指數"]:
+    _idx = _live_idx.get(_idx_name)
+    if _idx and not pd.isna(_idx.get("value")):
+        _cls = "tw-up" if (_idx.get("change") or 0) > 0 else ("tw-down" if (_idx.get("change") or 0) < 0 else "")
+        _chg = _idx.get("change")
+        _pct = _idx.get("pct")
+        _chg_txt = f"{_chg:+,.2f}" if not pd.isna(_chg) else "—"
+        _pct_txt = f"{_pct:+.2f}%" if not pd.isna(_pct) else "—"
+        _t_txt = f" · {_idx['time']}" if _idx.get("time") else ""
+        _idx_lines += (f'<div class="regime-msg"><b>{_idx_name}</b> {_idx["value"]:,.2f} '
+                        f'<span class="{_cls}">{_chg_txt}（{_pct_txt}）</span>{_t_txt}</div>')
+if _idx_lines:
+    _idx_lines += '<div class="regime-msg" style="opacity:.7;font-size:11px">即時來源：MIS（跟個股即時報價同一套）</div>'
 st.sidebar.markdown(f"""
 <div class="regime-card regime-{_regime_class}">
     <div class="regime-title">🌐 大盤位階 (Yahoo)</div>
@@ -3518,6 +3597,7 @@ st.sidebar.markdown(f"""
         <span class="regime-unit">分 / 100</span>
     </div>
     <div class="regime-msg">{regime['message']}</div>
+    {_idx_lines}
 </div>
 """, unsafe_allow_html=True)
 st.sidebar.caption("Token、API 診斷、回測費率等研究員參數請至「⚙️ 系統設定」分頁調整。")
@@ -3621,6 +3701,7 @@ def render_settings_tab():
             ("Yahoo 大盤", lambda: get_yahoo_taiex()),
             ("交易所今日快照(免額度)", lambda: get_market_snapshot()),
             ("MIS 即時報價(盤中主要來源)", lambda: _get_intraday_snapshot_via_mis()),
+            ("MIS 大盤指數(加權/櫃買)", lambda: pd.DataFrame(_get_index_snapshot_via_mis()).T),
         ]
         for label, fn in checks:
             try:
@@ -3670,13 +3751,32 @@ _dash_up = int((_dash_live.get("即時漲跌%", pd.Series(dtype=float)) > 0).sum
 _dash_down = int((_dash_live.get("即時漲跌%", pd.Series(dtype=float)) < 0).sum()) if not _dash_live.empty else 0
 _dash_flat = int((_dash_live.get("即時漲跌%", pd.Series(dtype=float)) == 0).sum()) if not _dash_live.empty else 0
 _dash_turnover = pd.to_numeric(_dash_live.get("成交金額", pd.Series(dtype=float)), errors="coerce").sum() if not _dash_live.empty else np.nan
-_dash_latest = "—"
+
 try:
-    _tw = get_yahoo_taiex()
-    if _tw is not None and len(_tw):
-        _dash_latest = f"{float(_tw.iloc[-1]):,.0f}"
+    _dash_idx = get_live_index_snapshot()
 except Exception:
-    pass
+    _dash_idx = {}
+
+
+def _dash_index_card(label, key):
+    """優先顯示 MIS 即時指數（會隨盤中跳動）；MIS 失敗時，加權指數退回 Yahoo 每日收盤價當備援，
+    櫃買指數目前沒有另外接 Yahoo 備援，失敗就顯示「—」，不冒充一個假數字。"""
+    idx = _dash_idx.get(key)
+    if idx and not pd.isna(idx.get("value")):
+        chg = idx.get("change"); pct = idx.get("pct")
+        cls = "tw-up" if (chg or 0) > 0 else ("tw-down" if (chg or 0) < 0 else "")
+        chg_txt = f"{chg:+,.2f}（{pct:+.2f}%）" if not pd.isna(chg) and not pd.isna(pct) else ""
+        sub = f'<span class="{cls}">{chg_txt}</span>' if chg_txt else "即時（MIS）"
+        return f'<div class="overview-card"><div class="overview-label">{label}</div><div class="overview-value">{idx["value"]:,.2f}</div><div class="overview-sub">{sub}</div></div>'
+    if key == "加權指數":
+        try:
+            _tw = get_yahoo_taiex()
+            if _tw is not None and len(_tw):
+                return f'<div class="overview-card"><div class="overview-label">{label}</div><div class="overview-value">{float(_tw.iloc[-1]):,.0f}</div><div class="overview-sub">Yahoo 每日收盤（MIS 即時連線失敗）</div></div>'
+        except Exception:
+            pass
+    return f'<div class="overview-card"><div class="overview-label">{label}</div><div class="overview-value">—</div><div class="overview-sub">目前無法取得</div></div>'
+
 
 st.markdown(f"""
 <div class="market-overview">
@@ -3684,7 +3784,8 @@ st.markdown(f"""
   <div class="overview-card"><div class="overview-label">台股即時樣本</div><div class="overview-value">{len(_dash_live):,}</div><div class="overview-sub"><span class="tw-up">上漲 {_dash_up:,}</span> · <span class="tw-down">下跌 {_dash_down:,}</span></div></div>
   <div class="overview-card"><div class="overview-label">成交金額</div><div class="overview-value">{(_dash_turnover/1e8):,.0f}<span style="font-size:12px;color:var(--text-sub)"> 億</span></div><div class="overview-sub">交易所快照 · 免 FinMind</div></div>
   <div class="overview-card"><div class="overview-label">上漲 / 下跌</div><div class="overview-value"><span class="tw-up">{_dash_up:,}</span> / <span class="tw-down">{_dash_down:,}</span></div><div class="overview-sub">平盤 {_dash_flat:,}</div></div>
-  <div class="overview-card"><div class="overview-label">^TWII 最新</div><div class="overview-value">{_dash_latest}</div><div class="overview-sub">Yahoo benchmark / 市場位階</div></div>
+  {_dash_index_card("加權指數", "加權指數")}
+  {_dash_index_card("櫃買指數", "櫃買指數")}
 </div>
 <div class="scanner-launch-grid">
   <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 盤中即時掃描</div><div class="scanner-launch-sub">即時行情 → 找出今日盤中機會 → 套用最近盤後基準買進分。原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
