@@ -2395,22 +2395,80 @@ def _intraday_action_help_text():
 
 
 def _eod_plain_advice(row):
-    """盤後／單股卡片用的一句話建議（給小白看）。"""
-    decision = str(row.get("決策", "")).strip()
-    risk = str(row.get("風險", "")).strip()
+    """盤後／單股卡片用的一句話建議（給小白看）。
+
+    設計原則：
+    - 不重算分數，只讀已有欄位（決策／風險／資料品質／狀態／市場環境／買進分）。
+    - 優先用「完整決策標籤」映射，避免 substring 誤判。
+    - 資料品質不足時，覆蓋其他樂觀語氣。
+    - 空頭下的「可買」必須比多頭更保守。
+    """
+    decision = str(row.get("決策", "") or "").strip()
+    risk = str(row.get("風險", "") or "").strip()
+    quality = str(row.get("資料品質", "") or "").strip()
+    status = str(row.get("狀態", "") or "").strip()
+    regime = str(row.get("市場環境", "") or row.get("market_regime", "") or "").strip().upper()
+    score = safe_float(row.get("買進分"), np.nan)
+    mode = str(row.get("策略模式", "") or DEFAULT_MODE).strip() or DEFAULT_MODE
+    mp = get_mode_params(mode)
+    buy_th = safe_float(mp.get("eod_buy_threshold"), 85)
+
+    # ── 1) 資料品質：不足時先擋樂觀解讀 ──
+    if "資料不足" in quality or quality.startswith("🔴"):
+        return "資料不完整，分數僅供參考——建議先到「查股票」確認後再決定。"
+
+    # ── 2) 完整決策標籤映射（優先） ──
+    if decision == "⚠️ 漲停勿追":
+        return "接近或封漲停，不建議追高，先觀察即可。"
+
+    if decision == "🟡 過熱觀察":
+        return "短線偏熱，建議先觀察、等回檔或冷卻，不要急著追。"
+
+    if decision == "🟢 可買":
+        if regime == "BEAR":
+            return "條件達標，但大盤偏弱——即使列入名單也建議更嚴、更小部位。"
+        if "🔴 高" in risk:
+            return "條件已達標，但風險偏高——建議小部位、設好停損再考慮。"
+        if "趨勢轉弱" in status:
+            return "分數達標，但狀態顯示趨勢偏弱——建議再確認後再列入名單。"
+        if "部分缺資料" in quality or quality.startswith("🟡"):
+            return "條件大致達標，但部分資料不足——可列入觀察，下單前先查一次單股。"
+        if regime == "NEUTRAL":
+            return "條件較完整，大盤震盪中——可列入明日觀察，部位建議偏保守。"
+        return "條件較完整，可列入明日觀察清單；仍請自己確認風險後再決定。"
+
+    if decision == "🟡 觀察":
+        if not pd.isna(score) and score >= buy_th - 3:
+            return "差一點就到可買門檻，值得盯；先觀察、不必急著進場。"
+        if "趨勢轉弱" in status:
+            return "尚未達標且趨勢偏弱，建議先放著、不必急。"
+        return "接近門檻，先觀察就好，不必急著進場。"
+
+    if decision == "🔴 不買":
+        if regime == "BEAR":
+            return "大盤偏弱且條件不足，建議先跳過。"
+        if "趨勢轉弱" in status:
+            return "條件不足且趨勢偏弱，建議先跳過。"
+        return "目前條件不足，建議先跳過，把時間留給分數更高的標的。"
+
+    # ── 3) 相容舊字串／異常值（substring 備援） ──
     if "漲停" in decision:
         return "接近或封漲停，不建議追高，先觀察即可。"
     if "過熱" in decision:
         return "短線偏熱，建議先觀察、不要急著追。"
-    if "🟢 可買" in decision:
+    if "🟢" in decision and "可買" in decision:
         if "🔴 高" in risk:
             return "條件已達標，但風險偏高——建議小部位、設好停損再考慮。"
         return "條件較完整，可列入明日觀察清單；仍請自己確認風險後再決定。"
-    if "🟡 觀察" in decision:
+    if "觀察" in decision:
         return "接近門檻，先觀察就好，不必急著進場。"
-    if "🔴 不買" in decision:
+    if "不買" in decision:
         return "目前條件不足，建議先跳過，把時間留給分數更高的標的。"
-    return "資料有限，建議先觀察、不要急著動作。"
+
+    # ── 4) 無法辨識決策 ──
+    if not decision:
+        return "尚未取得決策標籤，建議先觀察、不要急著動作。"
+    return "系統無法判讀此決策標籤，請以下方狀態與風險為準，先觀察即可。"
 
 
 def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
@@ -3029,7 +3087,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         else: explanation = "條件介於中間，等待更多訊號確認。"
         reasons = build_reasons(decision, breakout_reasons, chip_detail, fund, val, status_label)
         return {"股票代碼": stock_id, "現價": round(price,2), "買進分": round(buy_score,1), "優先級": priority,
-                "狀態": status_label, "風險": risk, "資料品質": quality,
+                "狀態": status_label, "風險": risk, "資料品質": quality, "市場環境": regime_dict.get("regime", "UNKNOWN"),
                 "近1日漲跌%": round(day_change_pct,2) if not pd.isna(day_change_pct) else np.nan, "近5日漲跌%": round(change_5d_pct,2) if not pd.isna(change_5d_pct) else np.nan, "近20日漲跌%": round(change_20d_pct,2) if not pd.isna(change_20d_pct) else np.nan,
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
@@ -3998,6 +4056,7 @@ with tab_help:
             <li>分頁改名：今日機會、深度掃描、查股票、我的庫存、進階研究。</li>
             <li>起漲雷達與完整資料預設收合；進階研究標示新手可略過。</li>
             <li>使用說明改為 1 分鐘上手版，並加入本更新日誌。</li>
+            <li>盤後白話建議強化：完整決策標籤映射、資料品質覆蓋、空頭／震盪可買降階、接近門檻提示。</li>
           </ul>
           <b>V12.x</b>：MIS 真即時報價、curl_cffi、背景自動更新、盤後／盤中資料分層、PIT 回測與 AI 戰績等。
           <br/><br/>
