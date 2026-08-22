@@ -1,5 +1,5 @@
 # app.py
-# 台股 V10.0 Smart Real-Time Scanner：盤中即時 + 盤後深度 + PIT 回測 + 統一買進分 / Point-in-Time 回測 + 統一買進分 + Benchmark + Walk-Forward (含 API 錯誤捕捉與診斷)
+# 台股 Quant Compass V12.5：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -1078,8 +1078,8 @@ st.markdown("""
   <div class="brand-block">
     <div class="brand-mark">✦</div>
     <div>
-      <div class="brand-title">QUANT COMPASS <span>V10.0</span></div>
-      <div class="brand-sub">Smart Real-Time Scanner · 台股量化決策終端</div>
+      <div class="brand-title">QUANT COMPASS <span>V12.5</span></div>
+      <div class="brand-sub">新手也能一眼看懂 · 台股量化決策終端</div>
     </div>
   </div>
   <div class="header-status">
@@ -2392,6 +2392,25 @@ def _intraday_action_help_text():
         "🟠觀察＝先留意；"
         "🔴先跳過＝目前不建議。"
     )
+
+
+def _eod_plain_advice(row):
+    """盤後／單股卡片用的一句話建議（給小白看）。"""
+    decision = str(row.get("決策", "")).strip()
+    risk = str(row.get("風險", "")).strip()
+    if "漲停" in decision:
+        return "接近或封漲停，不建議追高，先觀察即可。"
+    if "過熱" in decision:
+        return "短線偏熱，建議先觀察、不要急著追。"
+    if "🟢 可買" in decision:
+        if "🔴 高" in risk:
+            return "條件已達標，但風險偏高——建議小部位、設好停損再考慮。"
+        return "條件較完整，可列入明日觀察清單；仍請自己確認風險後再決定。"
+    if "🟡 觀察" in decision:
+        return "接近門檻，先觀察就好，不必急著進場。"
+    if "🔴 不買" in decision:
+        return "目前條件不足，建議先跳過，把時間留給分數更高的標的。"
+    return "資料有限，建議先觀察、不要急著動作。"
 
 
 def run_intraday_scan(universe_df, top_n=INTRADAY_TOP_N, mode=DEFAULT_MODE):
@@ -3838,8 +3857,8 @@ st.markdown(f"""
   {_dash_index_card("櫃買指數", "櫃買指數")}
 </div>
 <div class="scanner-launch-grid">
-  <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 盤中即時掃描</div><div class="scanner-launch-sub">即時行情 → 找出今日盤中機會 → 套用最近盤後基準買進分。原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
-  <div class="scanner-launch eod"><div class="scanner-launch-title">🌙 盤後深度掃描</div><div class="scanner-launch-sub">完整 PIT 研究 → 基本面 × 估值 × 籌碼 × 技術 → 建立明日研究池。</div><span class="launch-badge">FinMind 深度研究</span></div>
+  <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 今日機會</div><div class="scanner-launch-sub">先看 3 張卡片的「建議＋風險＋現價」。即時行情套用昨晚研究結果，原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
+  <div class="scanner-launch eod"><div class="scanner-launch-title">🌙 深度掃描</div><div class="scanner-launch-sub">完整研究 → 基本面 × 估值 × 籌碼 × 技術 → 建立「明天最值得看」名單。</div><span class="launch-badge">FinMind 深度研究</span></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -3847,112 +3866,142 @@ tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_advanced, tab_he
     "⚡ 今日機會", "🌙 深度掃描", "🔍 查股票", "🩺 我的庫存", "🏆 AI戰績", "🔬 進階研究", "📖 使用說明", "⚙️ 系統設定"
 ])
 
+# 首次開啟導覽（只顯示一次；可在使用說明再看完整版）
+if "onboarding_done" not in st.session_state:
+    st.session_state["onboarding_done"] = False
+if not st.session_state.get("onboarding_done"):
+    st.markdown("""
+    <div class="help-section help-highlight" style="margin:8px 0 14px 0;">
+      <div class="help-section-head"><div class="help-num">👋</div><div class="help-section-title">第一次使用？先記住這 3 步</div></div>
+      <div class="help-body">
+        <ol>
+          <li><b>晚上</b>：到「🌙 深度掃描」按一次掃描，產生明天觀察名單。</li>
+          <li><b>白天</b>：到「⚡ 今日機會」掃描，只看最上面 3 張卡片的「建議、風險、現價」。</li>
+          <li><b>記住</b>：🔥 搶先關注 ≠ 可以買；不確定就先觀察。詳細說明在「📖 使用說明」。</li>
+        </ol>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("✓ 我知道了，開始使用", type="primary", key="onboarding_ok"):
+        st.session_state["onboarding_done"] = True
+        st.rerun()
+
 # --- TAB：使用說明（單頁手冊：只有一個說明，手機上下滑就能看完，不用一路點展開） ---
 with tab_help:
-    st.subheader("📖 Quant Compass V10.2 AI Scorecard 使用說明")
-    st.caption("給第一次使用的人：不用懂量化，也能知道這個系統在做什麼、什麼時候按哪個按鈕。全部內容都在這一頁，往下滑就好。")
+    st.subheader("📖 Quant Compass V12.5 使用說明")
+    st.caption("給第一次使用的人：不用懂量化。先會「每天按哪兩個按鈕、卡片上三個字怎麼看」就夠了。")
 
     st.markdown("""
     <div class="terminal-grid">
-      <div class="terminal-card"><div class="tc-label">你可以把它想成</div><div class="tc-value">AI 台股決策助手</div><div class="tc-sub">每天幫你從市場找出值得研究的股票，不直接替你下單。</div></div>
-      <div class="terminal-card"><div class="tc-label">主要問題</div><div class="tc-value">今日 AI 觀察名單</div><div class="tc-sub">盤後找明日名單，盤中確認市場真的有沒有動能。</div></div>
-      <div class="terminal-card"><div class="tc-label">核心分數</div><div class="tc-value">買進分</div><div class="tc-sub">越高代表目前條件越完整；不是勝率，也不是保證獲利。</div></div>
-      <div class="terminal-card"><div class="tc-label">資料原則</div><div class="tc-value">PIT</div><div class="tc-sub">歷史驗證不使用當時尚未知道的未來資料。</div></div>
+      <div class="terminal-card"><div class="tc-label">你可以把它想成</div><div class="tc-value">台股觀察助手</div><div class="tc-sub">每天幫你從市場找出值得研究的股票，不替你下單。</div></div>
+      <div class="terminal-card"><div class="tc-label">新手先看</div><div class="tc-value">建議燈號</div><div class="tc-sub">先看「建議怎麼做」，分數點開再看。</div></div>
+      <div class="terminal-card"><div class="tc-label">核心分數</div><div class="tc-value">買進分</div><div class="tc-sub">越高＝條件越完整；不是勝率、不是保證獲利。</div></div>
+      <div class="terminal-card"><div class="tc-label">記住一句</div><div class="tc-value">🔥 ≠ 可買</div><div class="tc-sub">「搶先關注」只代表昨天反應強，還不是正式買點。</div></div>
     </div>
 
     <div class="help-doc">
 
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">1</div><div class="help-section-title">每天晚上要做什麼？</div></div>
-        <div class="help-body">
-          按「🌙 盤後深度」→「執行盤後深度掃描」，系統會依序做：
-          <ol>
-            <li>從上市＋上櫃股票中建立掃描清單。</li>
-            <li>先看流動性與技術條件，避免把 FinMind 額度浪費在冷門股票。</li>
-            <li>從候選股中挑出前段班。</li>
-            <li>一次批次抓基本面、營收、估值、法人與日 K。</li>
-            <li>用同一套「買進分」排序。</li>
-            <li>產生「明日最值得看」與「明日可優先研究」名單。</li>
-          </ol>
-          <b>簡單說：晚上是在回答「明天有哪些股票值得我看？」</b>
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">2</div><div class="help-section-title">隔天盤中要做什麼？</div></div>
-        <div class="help-body">
-          按「⚡ 盤中即時」→「一鍵掃描現在市場」。盤中主要看即時行情、成交量、漲跌與動能，並套用昨晚留下的研究結果。
-          它的目的不是重新做一遍財報研究，而是回答：<b>「昨晚看好的股票，今天市場真的有沒有在買？」</b>
-          盤中模式原則上不重新打完整 FinMind 研究資料，所以可以比盤後更頻繁使用。<b>只有在真正的交易時段（09:00–13:30，週一至週五）內，這個「有沒有在買」才有新的市場資料可以回答；非交易時段按掃描，抓到的會是最近一個交易日的收盤總結，重複按也不會變化。</b>
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">買進分到底是什麼？</div></div>
-        <div class="help-body">
-          買進分是把多個條件整理成一個容易排序的分數，包含：<b>基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境</b>。
-          例如 90 分代表「目前條件整體很強」，80 分代表「條件也不錯」，但<b>90 分不是 90% 勝率</b>。
-          所以實際操作還要一起看：<b>風險、資料品質、狀態、是否過熱、是否接近漲停</b>。
-          買進分回答「條件強不強」，風險分則回答「看錯了代價多大」——兩者是分開算的。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">4</div><div class="help-section-title">台股顏色怎麼看？</div></div>
-        <div class="help-body">
-          <b>價格／報酬：</b> 🔴 紅色＝上漲、🟢 綠色＝下跌、⚪ 灰色＝平盤。<br/>
-          <b>決策：</b> 🟢 可買、🟡 觀察、🔴 不買。<br/>
-          <b>風險：</b> 🟢 低風險、🟡 中風險、🔴 高風險。<br/>
-          <b>狀態標籤：</b> 🟢低位起漲／🟢趨勢發動／🟡強勢追蹤／🟠短線過熱／🔴趨勢轉弱（強勢和過熱不是同一件事）。<br/>
-          所以看到紅色時，要先看它是「價格上漲」還是「高風險」；兩者的意義不同。
-        </div>
-      </div>
-
       <div class="help-section help-highlight">
-        <div class="help-section-head"><div class="help-num">5</div><div class="help-section-title">看到『可買』是不是就一定要買？</div></div>
+        <div class="help-section-head"><div class="help-num">0</div><div class="help-section-title">第一次用：只要做這兩步</div></div>
         <div class="help-body">
-          <b>不是。</b>「可買」代表模型認為條件同時成立的程度較高，不代表未來一定上漲。
-          實戰建議依序確認：<b>買進分 → 風險 → 資料品質 → 是否過熱 → 盤中動能 → 最後才由你決定是否下單。</b>
-          漲停附近會標示 ⚠️ 漲停勿追。這套系統目前定位是<b>量化研究與交易決策輔助</b>，不是自動下單機器人。
+          <ol>
+            <li><b>晚上或收盤後</b>：打開「🌙 深度掃描」→ 按「執行盤後深度掃描」→ 看「明日最值得看」。</li>
+            <li><b>隔天開盤後</b>：打開「⚡ 今日機會」→ 按「掃描今日盤中機會」→ <b>只看最上面 3 張卡片</b>（建議、風險、現價）。</li>
+          </ol>
+          不確定就先觀察，不要因為分數高就立刻買。進階研究整頁都可以先不看。
         </div>
       </div>
 
       <div class="help-section">
-        <div class="help-section-head"><div class="help-num">6</div><div class="help-section-title">FinMind Token 是做什麼？怎麼省？</div></div>
+        <div class="help-section-head"><div class="help-num">1</div><div class="help-section-title">卡片上只要看三件事</div></div>
         <div class="help-body">
-          FinMind 主要負責盤後研究資料，例如日 K、營收、財報、PER/PBR、法人資料。
-          盤後完整研究是<b>批次抓取</b>：候選股票的完整資料一次分批取得，再逐檔計算分數，不會每一檔股票重複打好幾次 API。
-          <b>建議：</b>有 Token 就放在「⚙️ 系統設定」；盤中掃描則盡量不消耗 FinMind 額度。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">7</div><div class="help-section-title">這個系統每天真正要看的只有什麼？</div></div>
-        <div class="help-body">
-          如果不想看一堆數字，只看這 6 個，其他指標都是「需要深入研究時再打開」：
           <div class="help-quicklist">
-            <span class="help-chip">① 買進分</span>
-            <span class="help-chip">② 狀態</span>
-            <span class="help-chip">③ 風險</span>
-            <span class="help-chip">④ 資料品質</span>
-            <span class="help-chip">⑤ 近1／5／20日漲跌</span>
-            <span class="help-chip">⑥ 盤中動能</span>
+            <span class="help-chip">① 建議（怎麼處理）</span>
+            <span class="help-chip">② 風險（綠／黃／紅）</span>
+            <span class="help-chip">③ 現價與今日漲跌</span>
           </div>
+          <br/>
+          點開「查看分析」才會看到分數與細節。日常決策不需要一次看完所有數字。
         </div>
       </div>
 
       <div class="help-section">
-        <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">版本重點與尚未做到的事</div></div>
+        <div class="help-section-head"><div class="help-num">2</div><div class="help-section-title">建議燈號是什麼意思？</div></div>
         <div class="help-body">
           <ul>
-            <li><b>買進分是唯一的主分數。</b>綜合分、起漲分等內部因子仍在計算，但只出現在「股票分析」的詳細分析裡，不會同時丟兩個分數給你。</li>
-            <li><b>雙掃描器。</b>盤中即時與盤後深度共用同一套核心研究引擎，但資料層分開；盤中優先 0 FinMind，盤後才做完整深度分析。</li>
-            <li><b>全市場掃描是真的全市場。</b>優先用交易所官方 OpenAPI 的「今日全市場成交金額」快照排出最活躍的候選名單（免費、不吃 FinMind 額度），抓不到快照時才退回全市場均勻隨機取樣。</li>
-            <li><b>一週實測驗證的是買進分本身</b>，用一模一樣的公式與門檻回推歷史訊號，不是另一套簡化規則。</li>
+            <li><b>🟢 可買</b>：正式條件較完整，可列入觀察；仍請自己確認風險。</li>
+            <li><b>🔥 搶先關注</b>：昨天跳空／爆量／收在高點反應很強，但<b>還沒過正式買進門檻</b>——先記下來、先觀察，不要當「可以買」。</li>
+            <li><b>🟡 等待買點</b>：接近門檻，繼續看，不要急著追。</li>
+            <li><b>🟠 觀察</b>：可以留意，還沒到進場時機。</li>
+            <li><b>🔴 先跳過</b>：目前條件不足，把時間留給前面幾檔。</li>
           </ul>
-          買進分是內部多因子加權後的「目前條件強度」，不是未來上漲機率，也不是獲利保證；真正要驗證「能不能持續漲」，要看歷史驗證與之後的實際結果。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">訊號敏感度怎麼選？</div></div>
+        <div class="help-body">
+          只調整「門檻嚴不嚴」，不改分數怎麼算，也不會自動下單。
+          <ul>
+            <li><b>🛡 保守</b>：訊號少、較嚴，適合剛開始。</li>
+            <li><b>⚖ 標準（建議新手）</b>：預設，數量與品質較平衡。</li>
+            <li><b>🚀 積極</b>：訊號多，假訊號也多，需要自己多篩。</li>
+          </ul>
+          三種模式的掃描結果會分開保存，切換即可查看。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">4</div><div class="help-section-title">每天晚上：深度掃描</div></div>
+        <div class="help-body">
+          到「🌙 深度掃描」按「執行盤後深度掃描」。
+          系統會從全市場篩出流動性夠的股票，再做基本面／估值／籌碼／技術研究，排出「明天最值得看」的名單。
+          <b>簡單說：晚上回答「明天有哪些股票值得我看？」</b>
+          （「盤後」指的是用最近一個已收盤日的完整資料，不是限制你只能收盤後才能按。）
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">5</div><div class="help-section-title">隔天盤中：今日機會</div></div>
+        <div class="help-body">
+          到「⚡ 今日機會」按「掃描今日盤中機會」。
+          目的不是重做一遍財報研究，而是回答：<b>「昨晚看好的，今天市場有沒有在動？」</b>
+          原則上不消耗 FinMind 額度。只有交易時段（09:00–13:30，週一至週五）報價才會持續變化；非交易時段重複掃描結果相同是正常的。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">6</div><div class="help-section-title">買進分是什麼？（進階再看）</div></div>
+        <div class="help-body">
+          把基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境整理成 0–100 的排序分數。
+          <b>90 分不是 90% 勝率</b>。買進分回答「條件強不強」；風險回答「看錯代價多大」。
+          實際仍要自己決定是否下單。本系統是研究與決策輔助，不是自動下單機器人。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">7</div><div class="help-section-title">台股顏色與其他分頁</div></div>
+        <div class="help-body">
+          <b>價格：</b>紅漲、綠跌。<b>風險：</b>綠低／黃中／紅高（和漲跌顏色意義不同）。<br/>
+          <b>🔍 查股票</b>：單檔細看。<b>🩺 我的庫存</b>：持倉停損停利參考。<b>🏆 AI戰績</b>：歷史訊號表現。<b>🔬 進階研究</b>：回測工具，新手可整頁略過。<b>⚙️ 系統設定</b>：Token 與診斷。
+        </div>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">📋 更新日誌</div></div>
+        <div class="help-body">
+          <b>V12.5（2026-08-22）— 新手優先</b>
+          <ul>
+            <li>今日機會 Top3：改為「建議＋風險＋一句話」，分數收到點開才看。</li>
+            <li>明確標示：🔥 搶先關注 ≠ 可以買。</li>
+            <li>訊號敏感度：保守／標準／積極（三組真實門檻）。</li>
+            <li>分頁改名：今日機會、深度掃描、查股票、我的庫存、進階研究。</li>
+            <li>起漲雷達與完整資料預設收合；進階研究標示新手可略過。</li>
+            <li>使用說明改為 1 分鐘上手版，並加入本更新日誌。</li>
+          </ul>
+          <b>V12.x</b>：MIS 真即時報價、curl_cffi、背景自動更新、盤後／盤中資料分層、PIT 回測與 AI 戰績等。
           <br/><br/>
-          <b>尚未做到、留給下一版的事：</b>把買進分做成真正的「歷史勝率校準」（例如「買進分 85–89 的標的過去 5 日勝率 68%」），需要每天記錄當天的買進分、持續累積很多天才能算出可信的統計，這需要跨 session 的資料儲存，不是單一次 Streamlit session 能做到的，先誠實列在這裡，之後再做。
+          <b>V10–V11</b>：統一買進分、雙掃描器、模式分存快取、反應強訊號命名調整等。
         </div>
       </div>
 
@@ -3963,7 +4012,7 @@ with tab_help:
 #     即使它在畫面上排在最後一個分頁也一樣）---
 with tab_settings:
     st.subheader("⚙️ 系統設定")
-    st.caption("Token、API 診斷、回測費率、投組持股數，都集中在這裡——不影響「盤中即時／盤後深度」的日常使用。")
+    st.caption("Token、API 診斷、回測費率、投組持股數都在這裡——日常用「今日機會／深度掃描」即可，一般不用開設定。")
     render_settings_tab()
 
     st.divider()
@@ -4007,20 +4056,48 @@ def render_price_plan_html(plan):
 
 
 def render_pick_card(row, rank=None):
+    """盤後／單股結果卡：首層給白話建議，分數與細節次要。"""
     prefix = f"{rank}. " if rank else ""
     _name_raw = row.get("名稱")
     name = "" if (_name_raw is None or (isinstance(_name_raw, float) and pd.isna(_name_raw))) else str(_name_raw)
     _decision_raw = row.get("決策")
     _decision_str = "" if (_decision_raw is None or (isinstance(_decision_raw, float) and pd.isna(_decision_raw))) else str(_decision_raw)
-    reasons_html = "".join(f"<div>{'✓' if '🟢' in _decision_str else '✕' if '🔴' in _decision_str else '•'} {r}</div>" for r in row.get("理由", [])[:3])
+    reasons_list = row.get("理由", []) or []
+    if not isinstance(reasons_list, (list, tuple)):
+        reasons_list = []
+    reasons_html = "".join(
+        f"<div>{'✓' if '🟢' in _decision_str else '✕' if '🔴' in _decision_str else '•'} {html.escape(str(r))}</div>"
+        for r in reasons_list[:3]
+    )
+    advice = html.escape(_eod_plain_advice(row))
+    buy = safe_float(row.get("買進分"), 0)
+    risk = html.escape(str(row.get("風險", "—")))
+    decision = html.escape(_decision_str or "—")
+    status = html.escape(str(row.get("狀態", "—")))
+    quality = html.escape(str(row.get("資料品質", "—")))
+    price = row.get("現價", "—")
+    pri = safe_float(row.get("優先級", buy), buy)
+    r1 = format_num(row.get("近1日漲跌%"), 1, "%")
+    r5 = format_num(row.get("近5日漲跌%"), 1, "%")
+    r20 = format_num(row.get("近20日漲跌%"), 1, "%")
+    c1 = "tw-up" if safe_float(row.get("近1日漲跌%"), 0) > 0 else "tw-down" if safe_float(row.get("近1日漲跌%"), 0) < 0 else "tw-flat"
+    c5 = "tw-up" if safe_float(row.get("近5日漲跌%"), 0) > 0 else "tw-down" if safe_float(row.get("近5日漲跌%"), 0) < 0 else "tw-flat"
+    c20 = "tw-up" if safe_float(row.get("近20日漲跌%"), 0) > 0 else "tw-down" if safe_float(row.get("近20日漲跌%"), 0) < 0 else "tw-flat"
+    code = html.escape(str(row.get("股票代碼", "")))
+    name_e = html.escape(name)
+
     st.markdown(f"""
     <div class="pick-card">
         <div class="pick-top">
-            <span class="pick-name">{prefix}{row['股票代碼']} {name}</span>
-            <span class="pick-score">{row['買進分']:.0f}</span>
+            <span class="pick-name">{prefix}{code} {name_e}</span>
+            <span class="pick-score">{buy:.0f}</span>
         </div>
-        <div class="pick-sub">{row['決策']} ・ {row.get('狀態','')} ・ 風險 {row.get('風險','')} ・ 資料 {row.get('資料品質','—')} ・ 現價 {row['現價']} ・ 今日 <span class="{'tw-up' if safe_float(row.get('近1日漲跌%'),0)>0 else 'tw-down' if safe_float(row.get('近1日漲跌%'),0)<0 else 'tw-flat'}">{format_num(row.get('近1日漲跌%'), 1, '%')}</span> ・ 5日 <span class="{'tw-up' if safe_float(row.get('近5日漲跌%'),0)>0 else 'tw-down' if safe_float(row.get('近5日漲跌%'),0)<0 else 'tw-flat'}">{format_num(row.get('近5日漲跌%'), 1, '%')}</span> ・ 20日 <span class="{'tw-up' if safe_float(row.get('近20日漲跌%'),0)>0 else 'tw-down' if safe_float(row.get('近20日漲跌%'),0)<0 else 'tw-flat'}">{format_num(row.get('近20日漲跌%'), 1, '%')}</span></div>
-        <div class="pick-sub">風險調整優先級：<b>{row.get('優先級', row.get('買進分', 0)):.0f}</b> / 100</div>
+        <div class="pick-sub" style="margin-top:8px;color:var(--text-main);font-size:13.5px;line-height:1.5;"><b>建議：</b>{advice}</div>
+        <div class="pick-sub">{decision} ・ {status} ・ 風險 {risk} ・ 資料 {quality} ・ 現價 {price}
+            ・ 今日 <span class="{c1}">{r1}</span>
+            ・ 5日 <span class="{c5}">{r5}</span>
+            ・ 20日 <span class="{c20}">{r20}</span></div>
+        <div class="pick-sub">風險調整優先級：<b>{pri:.0f}</b> / 100</div>
         <div class="pick-reason">{reasons_html}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -5337,4 +5414,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V10.0 Final · Smart Real-Time Scanner · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · Realistic Costs · Benchmark · OOS Framework")
+st.caption("台股量化羅盤 Quant Compass V12.5 · 新手優先 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
