@@ -1936,12 +1936,45 @@ def _get_intraday_snapshot_via_mis():
         except (ValueError, TypeError):
             return np.nan
 
-    price_live = raw.get("z").map(_mis_parse_price) if "z" in raw.columns else pd.Series(np.nan, index=raw.index)
+    def _mis_first_book_price(v):
+        """五檔委買/委賣價欄位格式類似 '139.00_138.50_..._'，取第一段（最佳掛價）。
+        用來在『今天還沒有任何成交』時，給一個比昨收更貼近『現在』的參考價，
+        而不是直接沉默地退回昨收、讓使用者以為程式沒抓到資料。"""
+        if v is None:
+            return np.nan
+        s = str(v).strip()
+        if not s or s == "-":
+            return np.nan
+        first = s.split("_")[0].strip()
+        try:
+            p = float(first)
+            return p if p > 0 else np.nan
+        except (ValueError, TypeError):
+            return np.nan
+
+    price_trade = raw.get("z").map(_mis_parse_price) if "z" in raw.columns else pd.Series(np.nan, index=raw.index)
+    bid_price = raw.get("b").map(_mis_first_book_price) if "b" in raw.columns else pd.Series(np.nan, index=raw.index)
+    ask_price = raw.get("a").map(_mis_first_book_price) if "a" in raw.columns else pd.Series(np.nan, index=raw.index)
     prev_close = pd.to_numeric(raw.get("y"), errors="coerce")
-    # 只有寬鬆解析後仍然拿不到任何數字（真的沒有成交，例如開盤前、冷門股盤中掛零），
-    # 才退回昨收價，至少不會讓整檔股票從清單裡消失；等真的有成交，下一輪 15 秒快取就會更新。
-    used_prev_close_fallback = price_live.isna() & prev_close.notna()
-    price = price_live.fillna(prev_close)
+
+    # 價格來源優先順序：今日成交價 > 最佳委買價 > 最佳委賣價 > 昨收價。
+    # V12.6 修正：以前只要「z」（今日成交價）解析不出數字，就整批靜默退回昨收，
+    # 畫面上就變成一堆卡片顯示 +0.0% 又沒有成交時間，看起來像「沒抓到」；
+    # 實際上這些股票通常是「今天還沒有成交」（尤其開盤前幾分鐘、冷門股），
+    # 這種情況下五檔報價（委買／委賣）本身就是即時的，用它當現價比昨收更有參考價值，
+    # 而且明確標出「這是委買／委賣、不是成交」，比默默顯示昨收更不會誤導使用者。
+    price = price_trade.copy()
+    price_source = pd.Series("成交", index=raw.index)
+    _need = price.isna() & bid_price.notna()
+    price_source[_need] = "委買"
+    price = price.fillna(bid_price)
+    _need = price.isna() & ask_price.notna()
+    price_source[_need] = "委賣"
+    price = price.fillna(ask_price)
+    _need = price.isna() & prev_close.notna()
+    price_source[_need] = "昨收"
+    price = price.fillna(prev_close)
+    used_prev_close_fallback = price_source == "昨收"
 
     vol_lots = pd.to_numeric(raw.get("v"), errors="coerce").fillna(0)  # 累積成交量，單位：張
     out["即時價"] = price.values
@@ -1955,15 +1988,16 @@ def _get_intraday_snapshot_via_mis():
     out["成交金額"] = (price.values * out["成交量"].values).round(0)
     if "d" in raw.columns:
         out["資料日期"] = raw["d"].astype(str).values
+    out["報價來源"] = price_source.values  # 成交／委買／委賣／昨收，供 UI 標示這個現價的真實性質
     if "t" in raw.columns:
-        # MIS 回傳的「t」是這筆報價本身的成交時間（HH:MM:SS），是判斷「這個價格到底新不新」
-        # 最可靠的依據——比「我們幾點鐘呼叫 API」更準，因為冷門股本來就可能好幾分鐘沒成交，
-        # 這種情況下 t 停在原地是正常現象，不代表程式沒有重新抓取。
-        # 但如果這一列的「即時價」其實是退回昨收（used_prev_close_fallback=True），t 就不能照抄，
-        # 否則會出現「價格是昨收、時間卻是剛剛」這種誤導畫面；這種列的報價時間留白，
-        # 讓下游既有的「此股目前無成交時間資料，價格可能是昨收」提示自然接手說明。
+        # MIS 回傳的「t」是這筆報價本身的成交時間（HH:MM:SS），只在「報價來源＝成交」時才是
+        # 這個價格真正的最後成交時刻——比「我們幾點鐘呼叫 API」更準，因為冷門股本來就可能
+        # 好幾分鐘沒成交，這種情況下 t 停在原地是正常現象，不代表程式沒有重新抓取。
+        # 但如果這一列的現價其實是委買／委賣／昨收，t 就不能照抄，否則會出現
+        # 「價格不是成交價、時間卻是剛剛」這種誤導畫面；這種列的報價時間留白，
+        # 讓下游改用「報價來源」欄位標示（例如「委買」「昨收」）取代空白的成交時間。
         quote_time = raw["t"].astype(str).values
-        quote_time = np.where(used_prev_close_fallback.values, "", quote_time)
+        quote_time = np.where(used_prev_close_fallback.values | (price_source.values != "成交"), "", quote_time)
         out["報價時間"] = quote_time
     out["_退回昨收"] = used_prev_close_fallback.values
     out["來源"] = "MIS"
@@ -2017,6 +2051,10 @@ def get_intraday_market_snapshot():
         raise ValueError("交易所盤中快照無有效資料")
     for c in ["即時價", "漲跌", "即時漲跌%", "成交量", "成交金額"]:
         if c not in out: out[c] = np.nan
+    if "報價來源" not in out.columns:
+        # 走到整批 EOD 備援時（TWSE/TPEx 每日行情），沒有委買委賣可用，
+        # 統一標成「昨收」等級，讓下游 UI 標籤邏輯不會因為欄位缺失而報錯。
+        out["報價來源"] = "昨收"
     return out
 
 
@@ -4283,10 +4321,24 @@ with tab_intraday:
                                 f"若這個數字連續幾次完全一樣，代表交易所這段時間沒有新的成交資料（例如非交易時段），"
                                 f"不是程式沒有重新抓取。"
                             )
-                            # 個股層級：這批資料裡有幾檔因為抓不到當下成交價、被退回昨收價顯示
-                            # （這種列的「報價時間」會是空白，價格本身不是即時價）。跟下面整批 EOD_FALLBACK
-                            # 是不同層級的事——這裡只是少數個股，不代表整個 MIS 來源失效。
-                            if "_退回昨收" in live.columns:
+                            # 個股層級：這批資料裡有幾檔今天目前還沒有成交，價格改用委買／委賣／昨收顯示
+                            # （這種列的「報價時間」會是空白，但卡片上會標「委買價・尚無成交」等標籤）。
+                            # 跟下面整批 EOD_FALLBACK 是不同層級的事——這裡只是少數個股，
+                            # 不代表整個 MIS 來源失效。
+                            if "報價來源" in live.columns:
+                                _src_counts = live["報價來源"].value_counts()
+                                _no_trade_n = int(_src_counts.get("委買", 0) + _src_counts.get("委賣", 0))
+                                _prevclose_n = int(_src_counts.get("昨收", 0))
+                                _bits = []
+                                if _no_trade_n > 0:
+                                    _bits.append(f"{_no_trade_n} 檔今天還沒有成交、顯示委買／委賣掛價")
+                                if _prevclose_n > 0:
+                                    _bits.append(f"{_prevclose_n} 檔連掛價都抓不到、暫時顯示昨收價")
+                                if _bits:
+                                    st.session_state["intraday_scan_debug"] += (
+                                        f" 其中 {'，'.join(_bits)}（卡片與表格上會標示對應標籤，不是頁面沒更新）。"
+                                    )
+                            elif "_退回昨收" in live.columns:
                                 _fallback_n = int(live["_退回昨收"].sum())
                                 if _fallback_n > 0:
                                     st.session_state["intraday_scan_debug"] += (
@@ -4368,10 +4420,17 @@ with tab_intraday:
                     pct_txt = f"{pct:+.1f}%" if not pd.isna(pct) else "—"
 
                     quote_time = str(r.get("報價時間", "") or "").strip()
-                    quote_time_html = (
-                        f"　<span class='ip-quote-time'>成交 {html.escape(quote_time)}</span>"
-                        if quote_time and quote_time != "-" else ""
-                    )
+                    quote_source = str(r.get("報價來源", "") or "").strip()
+                    # V12.6：以前只要沒有成交時間，這裡就完全不顯示任何標籤，卡片看起來像
+                    # 「沒抓到資料」。現在一定會顯示一個標籤：有成交時間就顯示成交時間；
+                    # 沒有的話，改顯示「報價來源」（委買／委賣／昨收），讓使用者知道這個
+                    # 現價是怎麼來的，而不是留白讓人誤會。
+                    if quote_time and quote_time != "-":
+                        quote_time_html = f"　<span class='ip-quote-time'>成交 {html.escape(quote_time)}</span>"
+                    elif quote_source and quote_source != "成交":
+                        quote_time_html = f"　<span class='ip-quote-time'>{html.escape(quote_source)}價・尚無成交</span>"
+                    else:
+                        quote_time_html = ""
 
                     code = html.escape(str(r.get("股票代碼", "")))
                     name = html.escape(str(r.get("名稱", "")))
@@ -4449,9 +4508,15 @@ with tab_intraday:
                         st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}　｜　昨日反應：{hot_signal}")
                         st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
                         _quote_time = str(r.get("報價時間", "") or "").strip()
-                        _quote_time_text = f"（交易所成交時間：{_quote_time}）" if _quote_time and _quote_time != "-" else "（此股目前無成交時間資料，價格可能是昨收）"
+                        _quote_source = str(r.get("報價來源", "") or "").strip()
+                        if _quote_time and _quote_time != "-":
+                            _quote_time_text = f"（交易所成交時間：{_quote_time}）"
+                        elif _quote_source and _quote_source != "成交":
+                            _quote_time_text = f"（今天目前尚無成交，這是即時的{_quote_source}價，僅供參考）"
+                        else:
+                            _quote_time_text = "（此股目前無成交時間資料，價格可能是昨收）"
                         st.markdown(f"**📈 現價：** {current_text} {_quote_time_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
-                        st.caption("💡 「交易所成交時間」是這個價格真正的最後成交時刻。長時間沒往後跳＝這檔股票本身沒有新成交，不是頁面沒更新。")
+                        st.caption("💡 「交易所成交時間」是這個價格真正的最後成交時刻，長時間沒往後跳＝這檔股票本身沒有新成交，不是頁面沒更新。若標示「委買／委賣價」，代表這檔股票今天到目前為止還沒有任何成交，畫面上顯示的是目前最佳掛單價，不是成交價。")
                         st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
                         if "🔴 不買" in str(formal_decision):
                             st.info("盤後模型仍維持「不買」；「等待買點」只代表今天值得重新觀察，不代表可以進場。")
