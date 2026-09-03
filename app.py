@@ -1,11 +1,12 @@
 # app.py
-# 台股 Quant Compass V12.5：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
+# 台股 Quant Compass V12.6：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
 # 2. 加入 _log_api_error 捕捉並記錄靜默錯誤
 # 3. 側邊欄新增「API 診斷」面板
 # 4. 統一 market_prefilter 與 calculate_stock_at 的 get_daily 天數參數為 600，避免重複消耗 API 額度。
+# 5. V12.6：拿掉「保守」；標準／積極改為兩套選股邏輯（權重＋技術偏好），不只門檻差異。
 # ------------------------------------------------------------
 
 import time
@@ -291,15 +292,21 @@ def clear_saved_token():
 
 
 def load_saved_scan_all():
-    """讀出本機『每個模式（穩健／積極）各自』的盤後深度掃描結果，回傳 {mode: payload} 字典，
+    """讀出本機『每個模式（標準／積極）各自』的盤後深度掃描結果，回傳 {mode: payload} 字典，
     這樣兩個模式的結果可以同時保留，不會互相洗掉。"""
     try:
         if SCAN_CACHE_FILE.exists():
             data = pd.read_pickle(SCAN_CACHE_FILE)
             if isinstance(data, dict):
                 if "out" in data:
-                    # 相容舊版快取檔（改版前沒有分模式儲存），一律當成「平衡」模式的結果。
+                    # 相容舊版快取檔（改版前沒有分模式儲存），一律當成「平衡／標準」模式的結果。
                     return {"平衡": data}
+                # 舊版「保守」快取併入標準（平衡）
+                if "保守" in data and "平衡" not in data:
+                    data = dict(data)
+                    data["平衡"] = data.pop("保守")
+                elif "保守" in data:
+                    data = {k: v for k, v in data.items() if k != "保守"}
                 return data
     except Exception:
         pass
@@ -1078,7 +1085,7 @@ st.markdown("""
   <div class="brand-block">
     <div class="brand-mark">✦</div>
     <div>
-      <div class="brand-title">QUANT COMPASS <span>V12.5</span></div>
+      <div class="brand-title">QUANT COMPASS <span>V12.6</span></div>
       <div class="brand-sub">新手也能一眼看懂 · 台股量化決策終端</div>
     </div>
   </div>
@@ -1278,52 +1285,74 @@ def clamp(x, lo=0, hi=100):
 
 
 # =========================
-# V11.1 策略模式：平衡 / 積極（拿掉保守，只留這兩檔）
-# 兩種模式只調整「門檻」與「風控倍數」，不改變底層評分邏輯本身，
-# 讓同一套引擎可以用不同的敏感度掃描 / 回測 / 比較。
-# reaction_threshold：V11.1 新增，給「當日反應分」（跳空＋爆量＋收盤位置）用的獨立門檻，
-# 跟 radar_threshold（給即時雷達五子分數用）分開，兩組分數量級不同不能共用同一個門檻。
+# V12.6 策略模式：標準（平衡）/ 積極 — 兩套不同選股邏輯
+# 不再只靠分數門檻高低區分；權重、技術偏好、起漲比重都不同。
+#   標準：技術分析為主——趨勢穩定、量能正常、型態完整（一般投資人常用選股）。
+#   積極：飆股潛力為主——強勢突破、爆量、資金集中、短線爆發力。
+# reaction_threshold：給「當日反應分」（跳空＋爆量＋收盤位置）用的獨立門檻，
+# 跟 radar_threshold（給即時雷達五子分數用）分開。
 # =========================
 STRATEGY_MODES = {
-    "保守": {
-        "eod_buy_threshold": 90, "eod_watch_threshold": 72, "overheat_penalty": 25,
-        "bear_mult": 0.45, "hold_days": 12, "stop_atr": 1.8, "target_atr": 2.5,
-        "radar_threshold": 75, "radar_watch": 62, "reaction_threshold": 70,
-        "desc": "門檻最高、訊號最少，適合剛開始學習、希望少踩假訊號的人。",
-    },
     "平衡": {
-        "eod_buy_threshold": 85, "eod_watch_threshold": 65, "overheat_penalty": 20,
+        # 內部 key 仍用「平衡」以相容舊快取；UI 顯示為「標準」
+        "eod_buy_threshold": 82, "eod_watch_threshold": 65, "overheat_penalty": 22,
         "bear_mult": 0.55, "hold_days": 10, "stop_atr": 2.0, "target_atr": 3.0,
-        "radar_threshold": 68, "radar_watch": 55, "reaction_threshold": 62,
-        "desc": "維持 V10 原始門檻，訊號數量與品質取平衡（建議新手預設）。",
+        "radar_threshold": 68, "radar_watch": 55, "reaction_threshold": 58,
+        # 標準：基本面+估值仍佔比，技術權重提高、突破權重中等；買進分偏「趨勢完整」
+        "w_fund": 0.22, "w_moat": 0.08, "w_val": 0.14, "w_chips": 0.12,
+        "w_tech": 0.28, "w_breakout": 0.16,
+        "final_weight": 0.78, "early_weight": 0.22,
+        "prefer_stable_volume": True,
+        "desc": "標準模式：技術分析為主，篩選趨勢穩定、量能正常、型態完整的個股（建議新手預設）。",
     },
     "積極": {
-        "eod_buy_threshold": 78, "eod_watch_threshold": 55, "overheat_penalty": 10,
-        "bear_mult": 0.70, "hold_days": 7, "stop_atr": 2.5, "target_atr": 4.0,
-        "radar_threshold": 55, "radar_watch": 42, "reaction_threshold": 32,
-        "desc": "門檻最低、進場最早，訊號最多，也最容易誤觸假訊號。",
+        "eod_buy_threshold": 72, "eod_watch_threshold": 52, "overheat_penalty": 8,
+        "bear_mult": 0.72, "hold_days": 7, "stop_atr": 2.5, "target_atr": 4.0,
+        "radar_threshold": 52, "radar_watch": 38, "reaction_threshold": 32,
+        # 積極：籌碼+突破佔大宗，基本面/估值降權；買進分偏「動能／爆量／資金集中」
+        "w_fund": 0.08, "w_moat": 0.04, "w_val": 0.06, "w_chips": 0.22,
+        "w_tech": 0.18, "w_breakout": 0.42,
+        "final_weight": 0.42, "early_weight": 0.58,
+        "prefer_stable_volume": False,
+        "desc": "積極模式：飆股潛力為主，著重強勢突破、爆量、資金集中，尋找短線具爆發力的個股。",
     },
 }
 DEFAULT_MODE = "平衡"
 
-# UI 顯示用標籤 ↔ 內部 mode key（三組都有真實門檻差異）
-MODE_UI_OPTIONS = ["🛡 保守（訊號少、較嚴）", "⚖ 標準（建議新手）", "🚀 積極（訊號多、需自篩）"]
+# UI 顯示用標籤 ↔ 內部 mode key（只保留標準／積極兩種邏輯）
+MODE_UI_OPTIONS = ["⚖ 標準（趨勢穩健）", "🚀 積極（飆股潛力）"]
 MODE_UI_TO_KEY = {
-    "🛡 保守（訊號少、較嚴）": "保守",
+    "⚖ 標準（趨勢穩健）": "平衡",
+    "🚀 積極（飆股潛力）": "積極",
+    # 相容舊版 UI 字串，避免 session 殘留造成 KeyError
+    "🛡 保守（訊號少、較嚴）": "平衡",
     "⚖ 標準（建議新手）": "平衡",
     "🚀 積極（訊號多、需自篩）": "積極",
 }
-MODE_KEY_TO_UI = {v: k for k, v in MODE_UI_TO_KEY.items()}
+MODE_KEY_TO_UI = {
+    "平衡": "⚖ 標準（趨勢穩健）",
+    "積極": "🚀 積極（飆股潛力）",
+    "保守": "⚖ 標準（趨勢穩健）",  # 舊快取「保守」併入標準
+}
+
+
+def normalize_mode(mode):
+    """把舊版「保守」與各種別名統一成目前支援的 mode key。"""
+    if mode in ("保守", "標準"):
+        return "平衡"
+    if mode in STRATEGY_MODES:
+        return mode
+    return DEFAULT_MODE
 
 
 def get_mode_params(mode):
-    return STRATEGY_MODES.get(mode, STRATEGY_MODES[DEFAULT_MODE])
+    return STRATEGY_MODES.get(normalize_mode(mode), STRATEGY_MODES[DEFAULT_MODE])
 
 
 def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
     分數代表條件整體強弱，不是保證未來報酬率。
-    mode：平衡/積極，只調整買進與觀察的分數門檻，不改變分數本身。
+    mode：標準/積極，門檻與評分權重皆不同（見 calculate_stock_snapshot）。
     """
     mp = get_mode_params(mode)
     if limit_up:
@@ -3061,14 +3090,81 @@ def prepare_pit_sources(stock_id, daily_days=1500):
     }
 
 
+def _technical_score_for_mode(x, mode_params):
+    """依模式給出技術分（0–100）。
+    標準：偏好站穩均線、ADX 趨勢、RSI 健康區、量能正常（不過度爆量）。
+    積極：偏好突破高點附近、明顯放量、MACD 動能、短線強勢。
+    """
+    price = safe_float(x.get("close"))
+    ma20, ma60 = safe_float(x.get("MA20")), safe_float(x.get("MA60"))
+    macd, macd_sig = safe_float(x.get("MACD")), safe_float(x.get("MACD_signal"))
+    k, d = safe_float(x.get("K")), safe_float(x.get("D"))
+    rsi, adx = safe_float(x.get("RSI")), safe_float(x.get("ADX"))
+    vol_ratio = safe_float(x.get("VOL_RATIO"), 1.0)
+    high20 = safe_float(x.get("HIGH_20"))
+    score = 0.0
+
+    if mode_params.get("prefer_stable_volume", True):
+        # 標準：趨勢結構完整 > 單純爆量
+        if not pd.isna(price) and not pd.isna(ma20) and price > ma20:
+            score += 18
+        if not pd.isna(ma20) and not pd.isna(ma60) and ma20 > ma60:
+            score += 18
+        if not pd.isna(macd) and not pd.isna(macd_sig) and macd > macd_sig:
+            score += 12
+        if not pd.isna(k) and not pd.isna(d) and k > d:
+            score += 8
+        if not pd.isna(rsi) and 45 <= rsi <= 68:
+            score += 14  # 健康區間加分；過熱不加
+        elif not pd.isna(rsi) and 68 < rsi <= 75:
+            score += 4
+        if not pd.isna(adx) and adx >= 25:
+            score += 14
+        elif not pd.isna(adx) and adx >= 20:
+            score += 7
+        # 量能正常（約 0.9–2.0 倍）優於極端爆量
+        if 0.9 <= vol_ratio <= 2.0:
+            score += 12
+        elif vol_ratio > 2.0:
+            score += 5  # 爆量在標準模式不額外加太多
+        if not pd.isna(high20) and not pd.isna(price) and high20 > 0 and price >= high20 * 0.92:
+            score += 4  # 接近高點僅小幅加分，避免追高
+    else:
+        # 積極：動能、爆量、逼近／突破高點
+        if not pd.isna(price) and not pd.isna(ma20) and price > ma20:
+            score += 10
+        if not pd.isna(ma20) and not pd.isna(ma60) and ma20 > ma60:
+            score += 8
+        if not pd.isna(macd) and not pd.isna(macd_sig) and macd > macd_sig:
+            score += 12
+        if not pd.isna(k) and not pd.isna(d) and k > d:
+            score += 6
+        if not pd.isna(rsi) and 55 <= rsi <= 80:
+            score += 10  # 積極允許偏強 RSI
+        if not pd.isna(adx) and adx >= 22:
+            score += 10
+        if vol_ratio >= 3.0:
+            score += 22
+        elif vol_ratio >= 2.0:
+            score += 16
+        elif vol_ratio >= 1.5:
+            score += 10
+        elif vol_ratio >= 1.2:
+            score += 5
+        if not pd.isna(high20) and not pd.isna(price) and high20 > 0 and price >= high20 * 0.97:
+            score += 16  # 接近／突破 20 日高點是積極核心條件之一
+        elif not pd.isna(high20) and not pd.isna(price) and high20 > 0 and price >= high20 * 0.93:
+            score += 8
+    return clamp(score)
+
+
 def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DEFAULT_MODE):
     """唯一的核心評分引擎：正常選股與所有歷史回測共用。
     Point-in-time：每一類資料都先切到 as_of_date，再計算分數。
     財報採「財報日期 + 45 天」作為保守可得日代理；營收採 +15 天代理。
-    真正精準的 release-date backtest 仍需資料源提供公告日欄位。
-    mode：平衡/積極 — 只影響過熱懲罰、空頭市場折扣與決策門檻，分數計算方式不變，
-    確保不同模式之間的分數仍可互相比較。
+    mode：標準（平衡）/ 積極 — 使用不同因子權重與技術偏好，不只是門檻不同。
     """
+    mode = normalize_mode(mode)
     mp = get_mode_params(mode)
     try:
         as_of = pd.Timestamp(as_of_date)
@@ -3088,18 +3184,26 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         x = daily.iloc[-1]
         price = safe_float(x["close"])
         if pd.isna(price) or price <= 0: return None
-        technical = clamp((20 if price > safe_float(x["MA20"]) else 0) + (20 if safe_float(x["MA20"]) > safe_float(x["MA60"]) else 0) + (15 if safe_float(x["MACD"]) > safe_float(x["MACD_signal"]) else 0) + (10 if safe_float(x["K"]) > safe_float(x["D"]) else 0) + (10 if 50 <= safe_float(x["RSI"]) <= 70 else 0) + (10 if safe_float(x["ADX"]) >= 25 else 0) + (15 if safe_float(x["VOL_RATIO"]) >= 1.5 else 0))
+        technical = _technical_score_for_mode(x, mp)
         fund_pct = clamp(fund["score"] / 70 * 100)
         val_pct = clamp(val["score"] / 50 * 100)
         chips_pct = clamp(chips / 30 * 100)
         market_mult = 1.00 if regime_dict["regime"] == "BULL" else 0.85 if regime_dict["regime"] == "NEUTRAL" else mp["bear_mult"] if regime_dict["regime"] == "BEAR" else 0.75
-        raw = fund_pct * .30 + moat * .10 + val_pct * .15 + chips_pct * .15 + technical * .15 + breakout * .15
+        # 模式專屬權重（標準＝趨勢穩健；積極＝突破／籌碼動能）
+        raw = (
+            fund_pct * mp["w_fund"]
+            + moat * mp["w_moat"]
+            + val_pct * mp["w_val"]
+            + chips_pct * mp["w_chips"]
+            + technical * mp["w_tech"]
+            + breakout * mp["w_breakout"]
+        )
         final = clamp(raw * market_mult)
         distance_20_high = price / safe_float(x["HIGH_20"]) - 1 if safe_float(x["HIGH_20"]) > 0 else np.nan
         overheat = safe_float(x["RET_20"]) > .25 or safe_float(x["RSI"]) > 78 or (not pd.isna(distance_20_high) and distance_20_high > .03)
         early_score = max(0, breakout - mp["overheat_penalty"]) if overheat else breakout
         if regime_dict["regime"] == "BEAR": early_score = max(0, early_score - 20)
-        buy_score = clamp(final * .70 + early_score * .30)
+        buy_score = clamp(final * mp["final_weight"] + early_score * mp["early_weight"])
         status_label = momentum_status(x["RET_20"], x["RSI"], x["VOL_RATIO"], price, x["MA20"], x["MA60"], distance_20_high)
         risk = risk_level(x.get("ATR"), price, x["RSI"], breakout, regime_dict["regime"])
         prev_close = safe_float(daily.iloc[-2].get("close")) if len(daily) >= 2 else np.nan
@@ -3118,11 +3222,28 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             "技術": all(not pd.isna(safe_float(x.get(k))) for k in ["RSI","ADX","ATR"]),
         }
         quality = "🟢 完整" if sum(quality_inputs.values()) == 4 else ("🟡 部分缺資料" if sum(quality_inputs.values()) >= 2 else "🔴 資料不足")
-        if decision == "🟢 可買": explanation = "整體條件強，趨勢、基本面、估值與籌碼條件同步。"
-        elif decision == "🟡 過熱觀察": explanation = "趨勢仍強，但短線動能偏熱，優先等回檔或確認。"
-        elif decision == "⚠️ 漲停勿追": explanation = "分數高不代表可以追價，價格已接近漲停區。"
-        elif decision == "🔴 不買": explanation = "多項條件未同時成立，目前不列入新增買進。"
-        else: explanation = "條件介於中間，等待更多訊號確認。"
+        if mode == "積極":
+            if decision == "🟢 可買":
+                explanation = "積極邏輯：突破／爆量／資金集中條件偏強，短線動能值得優先關注。"
+            elif decision == "🟡 過熱觀察":
+                explanation = "動能仍強但短線偏熱，積極模式仍可觀察，不宜盲目追價。"
+            elif decision == "⚠️ 漲停勿追":
+                explanation = "已接近漲停，積極模式也不建議追價。"
+            elif decision == "🔴 不買":
+                explanation = "突破與資金動能尚未同步，積極名單暫不列入。"
+            else:
+                explanation = "積極條件部分成立，等待量能或突破再確認。"
+        else:
+            if decision == "🟢 可買":
+                explanation = "標準邏輯：趨勢結構、量能與基本條件較完整，適合一般選股研究。"
+            elif decision == "🟡 過熱觀察":
+                explanation = "趨勢仍在，但短線偏熱；標準模式建議等回檔或確認。"
+            elif decision == "⚠️ 漲停勿追":
+                explanation = "分數高不代表可以追價，價格已接近漲停區。"
+            elif decision == "🔴 不買":
+                explanation = "趨勢或量能結構尚未完整，標準模式暫不列入。"
+            else:
+                explanation = "條件介於中間，等待更多趨勢確認。"
         reasons = build_reasons(decision, breakout_reasons, chip_detail, fund, val, status_label)
         return {"股票代碼": stock_id, "現價": round(price,2), "買進分": round(buy_score,1), "優先級": priority,
                 "狀態": status_label, "風險": risk, "資料品質": quality, "市場環境": regime_dict.get("regime", "UNKNOWN"),
@@ -3138,6 +3259,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
     except Exception as e:
         _log_api_error("calculate_stock_snapshot", stock_id, e)
         return None
+
 
 
 def _normalize_batch_df(df, numeric_cols=()):
@@ -4035,15 +4157,14 @@ with tab_help:
       </div>
 
       <div class="help-section">
-        <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">訊號敏感度怎麼選？</div></div>
+        <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">標準 vs 積極：兩套選股邏輯</div></div>
         <div class="help-body">
-          只調整「門檻嚴不嚴」，不改分數怎麼算，也不會自動下單。
+          不是只改「分數門檻高低」，而是兩套不同的篩選方式（也不會自動下單）。
           <ul>
-            <li><b>🛡 保守</b>：訊號少、較嚴，適合剛開始。</li>
-            <li><b>⚖ 標準（建議新手）</b>：預設，數量與品質較平衡。</li>
-            <li><b>🚀 積極</b>：訊號多，假訊號也多，需要自己多篩。</li>
+            <li><b>⚖ 標準（趨勢穩健）</b>：技術分析為主——趨勢穩定、量能正常、型態較完整，偏向一般投資人常用選股；基本面／估值仍佔一定比重。</li>
+            <li><b>🚀 積極（飆股潛力）</b>：著重強勢突破、爆量、資金集中，尋找短線具爆發力的個股；訊號較多，也較容易誤觸，需要自己多篩。</li>
           </ul>
-          三種模式的掃描結果會分開保存，切換即可查看。
+          兩種模式的掃描結果會分開保存，切換即可查看，不必重跑。
         </div>
       </div>
 
@@ -4086,15 +4207,19 @@ with tab_help:
       <div class="help-section">
         <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">📋 更新日誌</div></div>
         <div class="help-body">
+          <b>V12.6 — 標準／積極雙邏輯</b>
+          <ul>
+            <li>拿掉「保守」模式，只保留「標準」與「積極」。</li>
+            <li>兩者不再只差門檻：標準偏趨勢穩健技術分析；積極偏突破／爆量／資金集中。</li>
+            <li>因子權重、技術計分、起漲比重皆依模式分開。</li>
+          </ul>
           <b>V12.5（2026-08-22）— 新手優先</b>
           <ul>
             <li>今日機會 Top3：改為「建議＋風險＋一句話」，分數收到點開才看。</li>
             <li>明確標示：🔥 搶先關注 ≠ 可以買。</li>
-            <li>訊號敏感度：保守／標準／積極（三組真實門檻）。</li>
             <li>分頁改名：今日機會、深度掃描、查股票、我的庫存、進階研究。</li>
             <li>起漲雷達與完整資料預設收合；進階研究標示新手可略過。</li>
             <li>使用說明改為 1 分鐘上手版，並加入本更新日誌。</li>
-            <li>盤後白話建議強化：完整決策標籤映射、資料品質覆蓋、空頭／震盪可買降階、接近門檻提示。</li>
           </ul>
           <b>V12.x</b>：MIS 真即時報價、curl_cffi、背景自動更新、盤後／盤中資料分層、PIT 回測與 AI 戰績等。
           <br/><br/>
@@ -4246,13 +4371,13 @@ with tab_intraday:
         st.error("無法取得股票清單，請到「⚙️ 系統設定」檢查 API。")
     else:
         intraday_mode_choice = st.radio(
-            "🎯 訊號敏感度（怎麼篩股票）",
+            "🎯 選股邏輯",
             MODE_UI_OPTIONS,
-            horizontal=True, index=1, key="intraday_mode_choice",
+            horizontal=True, index=0, key="intraday_mode_choice",
             help=(
-                "只調整「要不要標成訊號」的門檻，不會幫你自動下單。"
-                "保守＝門檻高、股票少但較嚴謹；標準＝建議新手；"
-                "積極＝門檻低、股票多，假訊號也多，需要自己多花時間篩選。"
+                "兩套不同邏輯，不是只改分數高低。"
+                "標準＝趨勢穩健、量能正常、型態較完整；"
+                "積極＝突破／爆量／資金集中，短線爆發力優先，訊號多也較易誤觸。"
             ),
         )
         intraday_mode = MODE_UI_TO_KEY.get(intraday_mode_choice, DEFAULT_MODE)
@@ -4656,14 +4781,14 @@ with tab_eod:
             strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1)
         with c3:
             eod_mode_choice = st.radio(
-                "🎯 訊號敏感度",
+                "🎯 選股邏輯",
                 MODE_UI_OPTIONS,
-                horizontal=True, index=1,
+                horizontal=True, index=0,
                 key="eod_mode_choice",
                 help=(
-                    "只調整「買進／觀察」門檻，不改變分數怎麼算。"
-                    "保守＝訊號少較嚴；標準＝建議新手；積極＝訊號多但假訊號也多。"
-                    "三種模式的掃描結果會分開保留，切換即可查看，不用重跑。"
+                    "標準＝技術趨勢穩健（量能正常、型態完整）；"
+                    "積極＝突破／爆量／資金集中（短線爆發力）。"
+                    "兩種邏輯的掃描結果會分開保留，切換即可查看，不用重跑。"
                 ),
             )
         eod_mode = MODE_UI_TO_KEY.get(eod_mode_choice, DEFAULT_MODE)
@@ -4813,7 +4938,7 @@ with tab_eod:
                     st.caption("跟深度研究的「買進分」是兩套獨立訊號：這裡只看昨天自己的跳空幅度、爆量倍數、收盤位置，"
                                "算得快、也是單股回測「盤中」模式用的同一套公式，但沒有基本面/估值把關，訊號更快也更容易誤觸，僅供快速掃視、不是正式買進訊號。")
                     if hot_hits.empty:
-                        st.info("目前沒有股票達到反應強門檻；可把上方「訊號敏感度」改成「積極」再掃描一次，看更多接近門檻的股票。")
+                        st.info("目前沒有股票達到反應強門檻；可把上方「選股邏輯」改成「積極」再掃描一次，看更多接近門檻的股票。")
                     else:
                         hot_cols = [c for c in ["排名", "股票代碼", "名稱", "反應分", "找飆股訊號", "跳空%", "量比", "收盤位置%", "反應訊號日"] if c in hot_hits.columns]
                         st.dataframe(
@@ -5361,8 +5486,8 @@ with tab_advanced:
             single_end = st.date_input("結束日期", value=datetime.now().date(), key="single_bt_end")
         single_scan_mode = "盤中"
         single_mode_choice = st.radio(
-            "進場積極程度", MODE_UI_OPTIONS, horizontal=True, index=1, key="single_bt_mode",
-            help="保守＝門檻高、訊號少；標準＝建議新手；積極＝門檻低、訊號多但假訊號也多。",
+            "選股邏輯", MODE_UI_OPTIONS, horizontal=True, index=0, key="single_bt_mode",
+            help="標準＝趨勢穩健技術分析；積極＝突破／爆量／資金集中的飆股邏輯。",
         )
         single_mode = MODE_UI_TO_KEY.get(single_mode_choice, DEFAULT_MODE)
         if single_stock_input and st.button("▶️ 執行單股回測", type="primary"):
@@ -5538,4 +5663,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V12.5 · 新手優先 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V12.6 · 新手優先 · 標準／積極雙邏輯 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
