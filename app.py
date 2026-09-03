@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V12.7：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
+# 台股 Quant Compass V12.8：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -8,6 +8,7 @@
 # 4. 統一 market_prefilter 與 calculate_stock_at 的 get_daily 天數參數為 600，避免重複消耗 API 額度。
 # 5. V12.6：拿掉「保守」；標準／積極改為兩套選股邏輯（權重＋技術偏好），不只門檻差異。
 # 6. V12.7：相對大盤強度、積極突破確認、校準動態門檻、流動性加嚴，提升訊號品質。
+# 7. V12.8：追高防護（軟過熱／大漲日勿追）＋回檔進場價，減少買在昨日高點後隔日倒貨。
 # ------------------------------------------------------------
 
 import time
@@ -1086,7 +1087,7 @@ st.markdown("""
   <div class="brand-block">
     <div class="brand-mark">✦</div>
     <div>
-      <div class="brand-title">QUANT COMPASS <span>V12.7</span></div>
+      <div class="brand-title">QUANT COMPASS <span>V12.8</span></div>
       <div class="brand-sub">新手也能一眼看懂 · 台股量化決策終端</div>
     </div>
   </div>
@@ -1478,17 +1479,67 @@ def calibration_threshold_adjust(mode=DEFAULT_MODE):
         return 0.0, f"校準讀取失敗:{type(e).__name__}"
 
 
+def detect_chase_risk(ret20, rsi, distance_20_high, day_change_pct=None, rs_excess=None):
+    """V12.8 追高／倒貨風險偵測。
+    回傳 (hard_overheat, soft_chase, reasons)
+      hard_overheat：舊版嚴格過熱 → 決策強制「過熱觀察」
+      soft_chase：已大漲或大漲日收近高點 → 不給「可買」，改「過熱觀察／等回檔」
+    針對「20日已漲約 20%＋當日大漲收高」隔日倒貨的典型型態。
+    """
+    ret20 = safe_float(ret20, 0)
+    rsi = safe_float(rsi, 50)
+    dist = safe_float(distance_20_high, 0)
+    day_pct = safe_float(day_change_pct, 0)
+    rs_ex = safe_float(rs_excess, np.nan)
+    reasons = []
+
+    hard = bool(ret20 > 0.25 or rsi > 78 or (not pd.isna(dist) and dist > 0.03))
+    if hard:
+        if ret20 > 0.25: reasons.append(f"20日漲幅{ret20*100:.0f}%偏大")
+        if rsi > 78: reasons.append(f"RSI {rsi:.0f}偏熱")
+        if not pd.isna(dist) and dist > 0.03: reasons.append("收近20日高點")
+
+    soft = False
+    # 軟過熱：20日漲幅已超過 15%（揚明光約 23% 會中）
+    if ret20 >= 0.15:
+        soft = True
+        reasons.append(f"20日已漲{ret20*100:.0f}%，不宜追價")
+    # 單日大漲且貼近波段高點
+    if day_pct >= 5.5 and (not pd.isna(dist) and dist >= -0.01):
+        soft = True
+        reasons.append(f"當日大漲{day_pct:.1f}%且收近高點")
+    # RSI 偏熱區間
+    if rsi >= 72 and ret20 >= 0.10:
+        soft = True
+        reasons.append(f"RSI {rsi:.0f}＋波段已漲")
+    # 相對大盤超額過大（擁擠的強勢）
+    if not pd.isna(rs_ex) and rs_ex >= 12 and ret20 >= 0.12:
+        soft = True
+        reasons.append(f"相對大盤超額{rs_ex:+.0f}%偏高")
+
+    # hard 已涵蓋 soft 的更極端情況
+    if hard:
+        soft = True
+    # 去重 reasons
+    uniq = []
+    for r in reasons:
+        if r not in uniq:
+            uniq.append(r)
+    return hard, soft, uniq[:3]
+
+
 def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE,
-                   breakout_ok=True, rs_excess=None, threshold_adj=0.0):
+                   breakout_ok=True, rs_excess=None, threshold_adj=0.0, chase_risk=False):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
-    V12.7：納入突破確認、相對強度與校準動態門檻。
+    V12.8：納入突破確認、相對強度、校準動態門檻、追高防護。
     """
     mp = get_mode_params(mode)
     buy_th = mp["eod_buy_threshold"] + safe_float(threshold_adj, 0)
     watch_th = mp["eod_watch_threshold"] + max(0, safe_float(threshold_adj, 0) * 0.5)
     if limit_up:
         return "⚠️ 漲停勿追"
-    if overheat:
+    # 嚴格過熱或追高風險：一律不給可買
+    if overheat or chase_risk:
         return "🟡 過熱觀察"
     if market_regime == "BEAR" and score < buy_th - 5:
         return "🔴 不買"
@@ -1586,8 +1637,8 @@ def momentum_status(ret20, rsi, vol_ratio, close, ma20, ma60, distance_20_high):
     # 🔴 趨勢轉弱：跌破 MA20，不管漲幅多小都優先標記
     if trend_down:
         return "🔴 趨勢轉弱"
-    # 🟠 短線過熱：漲幅／RSI／乖離同時偏極端
-    if (ret20 > 0.25 or rsi > 78 or distance_20_high > 0.03):
+    # 🟠 短線過熱：V12.8 門檻下修，20日漲幅>18% 或 RSI>75 或貼近高點即標示
+    if (ret20 > 0.18 or rsi > 75 or distance_20_high > 0.02):
         return "🟠 短線過熱"
     # 🟡 強勢追蹤：趨勢向上但量能沒跟上，屬於持續觀察
     if trend_up and vol_ratio < 1.2:
@@ -3376,20 +3427,27 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         )
         final = clamp(raw * market_mult)
         distance_20_high = price / safe_float(x["HIGH_20"]) - 1 if safe_float(x["HIGH_20"]) > 0 else np.nan
-        overheat = safe_float(x["RET_20"]) > .25 or safe_float(x["RSI"]) > 78 or (not pd.isna(distance_20_high) and distance_20_high > .03)
-        early_score = max(0, breakout - mp["overheat_penalty"]) if overheat else breakout
+        prev_close = safe_float(daily.iloc[-2].get("close")) if len(daily) >= 2 else np.nan
+        day_change_pct = (price / prev_close - 1) * 100 if not pd.isna(prev_close) and prev_close > 0 else np.nan
+        hard_oh, chase_risk, chase_reasons = detect_chase_risk(
+            x.get("RET_20"), x.get("RSI"), distance_20_high,
+            day_change_pct=day_change_pct, rs_excess=rs_excess,
+        )
+        overheat = hard_oh  # 嚴格過熱仍用於起漲分懲罰
+        early_score = max(0, breakout - mp["overheat_penalty"]) if (overheat or chase_risk) else breakout
         if regime_dict["regime"] == "BEAR": early_score = max(0, early_score - 20)
         # 積極模式：未確認突破則起漲分打折，降低假突破買進分
         if mode == "積極" and not breakout_ok:
             early_score = early_score * 0.55
+        # 追高風險再壓低起漲權重
+        if chase_risk and not overheat:
+            early_score = early_score * 0.65
         buy_score = clamp(final * mp["final_weight"] + early_score * mp["early_weight"])
         # 相對弱勢再扣一點（避免只靠基本面高分）
         if not pd.isna(rs_excess) and rs_excess <= -5:
             buy_score = clamp(buy_score - (4 if mode == "平衡" else 2))
         status_label = momentum_status(x["RET_20"], x["RSI"], x["VOL_RATIO"], price, x["MA20"], x["MA60"], distance_20_high)
         risk = risk_level(x.get("ATR"), price, x["RSI"], breakout, regime_dict["regime"])
-        prev_close = safe_float(daily.iloc[-2].get("close")) if len(daily) >= 2 else np.nan
-        day_change_pct = (price / prev_close - 1) * 100 if not pd.isna(prev_close) and prev_close > 0 else np.nan
         ref5_close = safe_float(daily.iloc[-6].get("close")) if len(daily) >= 6 else np.nan
         change_5d_pct = (price / ref5_close - 1) * 100 if not pd.isna(ref5_close) and ref5_close > 0 else np.nan
         ref20_close = safe_float(daily.iloc[-21].get("close")) if len(daily) >= 21 else np.nan
@@ -3400,7 +3458,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"),
             market_regime=regime_dict["regime"], mode=mode,
             breakout_ok=(breakout_ok if mode == "積極" else True),
-            rs_excess=rs_excess, threshold_adj=th_adj,
+            rs_excess=rs_excess, threshold_adj=th_adj, chase_risk=chase_risk,
         )
         priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
         quality_inputs = {
@@ -3414,7 +3472,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             if decision == "🟢 可買":
                 explanation = "積極邏輯：突破已確認（量能＋收盤位置），短線動能值得優先關注。"
             elif decision == "🟡 過熱觀察":
-                explanation = "動能仍強但短線偏熱，積極模式仍可觀察，不宜盲目追價。"
+                explanation = "動能仍強但已有追高風險（波段漲多／大漲日收高），請等回檔，不要追價。"
             elif decision == "⚠️ 漲停勿追":
                 explanation = "已接近漲停，積極模式也不建議追價。"
             elif decision == "🔴 不買":
@@ -3428,7 +3486,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             if decision == "🟢 可買":
                 explanation = "標準邏輯：趨勢結構、相對強度與基本條件較完整，適合一般選股研究。"
             elif decision == "🟡 過熱觀察":
-                explanation = "趨勢仍在，但短線偏熱；標準模式建議等回檔或確認。"
+                explanation = "趨勢仍在但短線偏熱或已大漲一段；標準模式請等回檔，勿追昨收。"
             elif decision == "⚠️ 漲停勿追":
                 explanation = "分數高不代表可以追價，價格已接近漲停區。"
             elif decision == "🔴 不買":
@@ -3440,7 +3498,11 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
                 explanation = "條件介於中間，等待更多趨勢確認。"
         if th_adj and abs(th_adj) >= 1:
             explanation = explanation + f"（校準門檻調整 {th_adj:+.0f}：{th_note}）"
+        if chase_risk and chase_reasons:
+            explanation = explanation + "｜追高防護：" + "、".join(chase_reasons[:2])
         reasons = build_reasons(decision, breakout_reasons, chip_detail, fund, val, status_label)
+        if chase_risk and chase_reasons:
+            reasons = [f"⚠️ 追高防護：{chase_reasons[0]}"] + list(reasons)[:2]
         if mode == "積極" and conf_reasons:
             reasons = list(reasons)[:2] + [f"突破確認：{'、'.join(conf_reasons[:2])}"]
         if not pd.isna(rs_excess):
@@ -3453,7 +3515,10 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
                 "護城河": round(moat,1), "相對強度": round(rs_score,1), "相對超額%": round(rs_excess,2) if not pd.isna(rs_excess) else np.nan,
                 "突破確認": "是" if breakout_ok else "否", "確認分": round(conf_score,1),
                 "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
-                "過熱": "是" if overheat else "否", "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]), "策略模式": mode,
+                "過熱": "是" if overheat else ("追高" if chase_risk else "否"),
+                "追高風險": "是" if chase_risk else "否",
+                "追高原因": "、".join(chase_reasons) if chase_reasons else "",
+                "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]), "策略模式": mode,
                 "校準門檻調整": th_adj, "校準說明": th_note,
                 "趨勢": [round(float(v), 2) for v in daily["close"].tail(20).pct_change().fillna(0).cumsum().add(1).tolist()],
                 "daily": daily, "fund": fund, "moat_detail": moat_detail,
@@ -3689,29 +3754,69 @@ def evaluate_holding_action(stock_row, cost, shares, stop_loss_pct=8.0, take_pro
 
 
 def suggest_price_plan(stock_row, stop_loss_pct=10.0):
-    """給還沒買進的人看的「進出場價參考」：假設現在用市價買進，AI 建議的初始停損、
-    目標價1／目標價2 會是多少。
+    """給還沒買進的人看的「進出場價參考」。
 
-    刻意不另外發明新公式——直接借用「庫存健康」的 evaluate_holding_action()：
-    把「持有成本」設成「現在的價格」，等於模擬『現在剛買進』這件事，這樣同一檔股票
-    不管是盤中掃描看到、還是之後放進庫存健康追蹤，算出來的停損／目標價邏輯永遠一致，
-    不會有「兩套價格」互相打架的問題。
+    V12.8：若偵測到追高／過熱，參考進場價改為「回檔價」
+    （MA5、近5日低點、或現價×0.97 取較合理者），而不是直接用昨收／現價追進去。
+    停損／目標仍沿用 evaluate_holding_action，但成本改以建議進場價計算。
 
-    這是量化規則算出來的參考值，不是報價系統的委託單，也不是保證停利／停損一定成交
-    在這個價位；真正下單時還是要看當下的市價與委託簿。
+    這是量化規則參考值，不是委託單，也不保證成交。
     """
     price = safe_float(stock_row.get("現價"))
     if pd.isna(price):
         price = safe_float(stock_row.get("即時價"))
     if pd.isna(price) or price <= 0:
         return None
-    # evaluate_holding_action 內部固定讀 stock_row 的「現價」欄位；盤中掃描的資料
-    # 用的欄位名是「即時價」，這裡統一補上「現價」，確保兩邊算出來的價位一致。
+
     row_for_calc = dict(stock_row) if isinstance(stock_row, dict) else stock_row.to_dict()
-    row_for_calc["現價"] = price
-    plan = evaluate_holding_action(row_for_calc, cost=price, shares=0, stop_loss_pct=stop_loss_pct)
+    chase = str(row_for_calc.get("追高風險", "") or "") == "是"
+    overheat_flag = str(row_for_calc.get("過熱", "") or "") in ("是", "追高")
+    decision = str(row_for_calc.get("決策", "") or "")
+    ret20 = safe_float(row_for_calc.get("近20日漲跌%"), np.nan)
+    if not pd.isna(ret20) and abs(ret20) > 1.5:
+        ret20 = ret20 / 100.0  # 若是百分比數字
+
+    entry = price
+    entry_note = "以現價／昨收作為參考進場（非追價保證）。"
+    wait_pullback = chase or overheat_flag or ("過熱" in decision) or (not pd.isna(ret20) and ret20 >= 0.15)
+
+    ma5 = ma20 = low5 = np.nan
+    daily = row_for_calc.get("daily")
+    if isinstance(daily, pd.DataFrame) and not daily.empty:
+        last = daily.iloc[-1]
+        ma5 = safe_float(last.get("MA5"))
+        ma20 = safe_float(last.get("MA20"))
+        if "min" in daily.columns and len(daily) >= 5:
+            low5 = safe_float(daily["min"].tail(5).min())
+        elif "close" in daily.columns and len(daily) >= 5:
+            low5 = safe_float(daily["close"].tail(5).min())
+
+    if wait_pullback:
+        candidates = [price * 0.97]
+        if not pd.isna(ma5) and ma5 > 0:
+            candidates.append(ma5)
+        if not pd.isna(low5) and low5 > 0:
+            candidates.append(low5)
+        # 回檔進場：取低於現價的候選中最高者（較接近、較可執行），且至少比現價低 1.5%
+        below = [c for c in candidates if not pd.isna(c) and c < price * 0.985]
+        if below:
+            entry = max(below)
+        else:
+            entry = price * 0.97
+        entry_note = (
+            f"已有追高／過熱風險，請等回檔再考慮；參考進場約 {entry:.2f}"
+            f"（現價 {price:.2f}），不要用昨收直接追。"
+        )
+        if not pd.isna(ma5):
+            entry_note += f" MA5≈{ma5:.2f}。"
+
+    row_for_calc["現價"] = entry  # 用建議進場價推停損／目標
+    plan = evaluate_holding_action(row_for_calc, cost=entry, shares=0, stop_loss_pct=stop_loss_pct)
     return {
-        "參考進場價": price,
+        "參考進場價": round(entry, 2),
+        "現價參考": round(price, 2),
+        "進場說明": entry_note,
+        "等回檔": wait_pullback,
         "AI建議停損價": plan.get("建議停損價"),
         "目標價1": plan.get("目標價1"),
         "目標價2": plan.get("目標價2"),
@@ -4410,6 +4515,12 @@ with tab_help:
       <div class="help-section">
         <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">📋 更新日誌</div></div>
         <div class="help-body">
+          <b>V12.8 — 追高防護</b>
+          <ul>
+            <li>20日漲幅偏大／當日大漲收高／相對超額過高 → 不給「可買」，改「過熱觀察」。</li>
+            <li>進場價改建議「回檔價」（MA5／近低），避免用昨收直接追。</li>
+            <li>狀態「短線過熱」門檻下修，較早警示。</li>
+          </ul>
           <b>V12.7 — 準度強化</b>
           <ul>
             <li>相對大盤 20 日強度：過濾「大盤弱、個股也弱」的假強勢。</li>
@@ -4462,29 +4573,51 @@ scan_workers = st.session_state["cfg_scan_workers"]
 
 
 def render_price_plan_html(plan):
-    """把『如果現在買，進出場價抓多少』畫成一個小方塊。plan 來自 suggest_price_plan()。"""
+    """把進出場價參考畫成小方塊。V12.8：有追高風險時標題與進場標籤改為「等回檔」。"""
     if not plan:
         return ""
     entry = plan.get("參考進場價", np.nan)
     stop_v = plan.get("AI建議停損價", np.nan)
     t1 = plan.get("目標價1", np.nan)
     t2 = plan.get("目標價2", np.nan)
+    wait = bool(plan.get("等回檔"))
+    note_extra = str(plan.get("進場說明") or "")
+    spot = plan.get("現價參考", np.nan)
 
     def _fmt(v):
         return f"{v:.2f}" if (v is not None and not pd.isna(v)) else "—"
 
+    title = "💰 如果要買，建議這樣抓進出場價（AI 參考，非委託單）"
+    if wait:
+        title = "💰 已偏強／有追高風險：請等回檔再進（AI 參考，非委託單）"
+    entry_label = "建議回檔進場價" if wait else "參考進場價"
+    base_note = (
+        "操作參考：接近或跌破停損價就出場；到目標價1先賣一部分、到目標價2再賣一部分，"
+        "剩下用停損顧著。價格隨 ATR 動態調整，不是固定百分比。"
+    )
+    if wait and note_extra:
+        base_note = f"⚠️ {html.escape(note_extra)} " + base_note
+    elif note_extra:
+        base_note = html.escape(note_extra) + " " + base_note
+    if wait and spot is not None and not (isinstance(spot, float) and pd.isna(spot)):
+        try:
+            base_note += f" 目前現價約 {_fmt(float(spot))}，不要用現價／昨收直接追。"
+        except Exception:
+            pass
+
     return f"""
 <div class="price-plan-box">
-    <div class="price-plan-title">💰 如果現在買，這樣抓進出場價（AI 參考，非委託單）</div>
+    <div class="price-plan-title">{title}</div>
     <div class="price-plan-row">
-        <div class="price-plan-item"><div class="pp-label">參考進場價</div><div class="pp-value">{_fmt(entry)}</div></div>
+        <div class="price-plan-item"><div class="pp-label">{entry_label}</div><div class="pp-value">{_fmt(entry)}</div></div>
         <div class="price-plan-item"><div class="pp-label">🛑 建議停損價</div><div class="pp-value" style="color:var(--accent-red);">{_fmt(stop_v)}</div></div>
         <div class="price-plan-item"><div class="pp-label">🎯 目標價1</div><div class="pp-value" style="color:var(--accent-green);">{_fmt(t1)}</div></div>
         <div class="price-plan-item"><div class="pp-label">🎯 目標價2</div><div class="pp-value" style="color:var(--accent-green);">{_fmt(t2)}</div></div>
     </div>
-    <div class="price-plan-note">操作參考：接近或跌破停損價就出場保本；到目標價1先賣一部分、到目標價2再賣一部分，剩下的用停損價顧著就好，不用一次全賣。這組價格會隨這檔股票自己的波動度（ATR）自動變動，不是固定百分比，之後只要在「🩺 庫存健康」輸入你實際成交的價格，就能接著追蹤同一套停損／停利。</div>
+    <div class="price-plan-note">{base_note}</div>
 </div>
 """
+
 
 
 def render_pick_card(row, rank=None):
@@ -5873,4 +6006,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V12.7 · 新手優先 · 標準／積極雙邏輯 · 相對強度／突破確認 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V12.8 · 新手優先 · 追高防護／回檔進場 · 標準／積極雙邏輯 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
