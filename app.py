@@ -1,23 +1,17 @@
 # app.py
-# 台股 Quant Compass V13.0：驗證紀律版 — 參數凍結 + 下市股宇宙 + 顯著性門檻 + 前瞻盲測優先
+# 台股 Quant Compass V13.1：驗證紀律 + 實盤可用性加強版
 # ------------------------------------------------------------
-# 修正說明：
-# 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
-# 2. 加入 _log_api_error 捕捉並記錄靜默錯誤
-# 3. 側邊欄新增「API 診斷」面板
-# 4. 統一 market_prefilter 與 calculate_stock_at 的 get_daily 天數參數為 600，避免重複消耗 API 額度。
-# 5. V12.6：拿掉「保守」；標準／積極改為兩套選股邏輯（權重＋技術偏好），不只門檻差異。
-# 6. V12.7：相對大盤強度、積極突破確認、校準動態門檻、流動性加嚴，提升訊號品質。
-# 7. V12.8：追高防護（軟過熱／大漲日勿追）＋回檔進場價，減少買在昨日高點後隔日倒貨。
-# 8. V12.9（賺錢導向）：拉開標準／積極差異；標準提高結構+相對強度、更嚴不追高；
-#    積極必須爆量突破確認才給可買、未確認起漲分大幅打折；減少兩模式前排重複與假訊號。
-# 9. V13.0（驗證紀律）：
-#    - 核心 STRATEGY_MODES 參數凍結（PARAMS_FROZEN=True），禁止因單筆虧損再手動調權重
-#    - 研究宇宙可合併 FinMind 下市股（TaiwanStockDelisting），降低生存者偏差
-#    - strategy_leaderboard 加入交易筆數門檻 + bootstrap 勝率/報酬信賴區間，樣本不足不排名
-#    - calibration 可靠度門檻提高；「最佳區間」需足夠樣本才顯示
-#    - 流動性門檻略升（MIN_AVG_TURNOVER），減少薄量股假滑價
-#    真正 edge 只能靠凍結參數後的真實前瞻累積（AI戰績），不是再調規則。
+# 修正說明（繼承 V13.0 全部內容）：
+# 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
+# 10. V13.1（實盤可用性與可驗證 edge）：
+#    - AI戰績升級為活體儀表板：自動狀態卡（STABLE/WATCH/DRIFT）、明確行動建議
+#    - 新增 ATR 風險預算部位建議（suggest_position_size）+ regime 曝險乘數
+#    - 決策與卡片顯示建議倉位與風險預算，方便直接執行
+#    - 漲停／接近漲停執行現實性加嚴（可買降級）
+#    - 庫存健康新增組合層級摘要（總曝險、集中度、平均信心）
+#    - 首頁／驗證頁強化 drift 警示，避免忽略失效訊號
+#    - 成本與滑價假設在建議中更一致呈現
+#    核心 STRATEGY_MODES 仍凍結；真正 edge 只認 AI戰績累積的真實前瞻。
 # ------------------------------------------------------------
 
 import time
@@ -1103,8 +1097,8 @@ st.markdown("""
   <div class="brand-block">
     <div class="brand-mark">✦</div>
     <div>
-      <div class="brand-title">QUANT COMPASS <span>V12.8</span></div>
-      <div class="brand-sub">新手也能一眼看懂 · 台股量化決策終端</div>
+      <div class="brand-title">QUANT COMPASS <span>V13.1</span></div>
+      <div class="brand-sub">驗證紀律 · 部位建議 · 活體 AI戰績 · 台股量化決策終端</div>
     </div>
   </div>
   <div class="header-status">
@@ -1337,13 +1331,14 @@ STRATEGY_MODES = {
     },
 }
 
-# V13.0：參數凍結旗標。True 時核心權重/門檻視為已鎖定，研究結論應建立在「凍結後的真實前瞻」上，
+# V13.0/V13.1：參數凍結旗標。True 時核心權重/門檻視為已鎖定，研究結論應建立在「凍結後的真實前瞻」上，
 # 而不是再因單筆虧損或名單重疊去改數字。若必須解凍，改 False 並在註解寫明原因與日期。
 PARAMS_FROZEN = True
 PARAMS_FROZEN_AT = "2026-09-03"
 PARAMS_FROZEN_NOTE = (
-    "V13.0 起核心 STRATEGY_MODES 已凍結。Walk-forward / leaderboard 僅能驗證『這組固定規則』的表現，"
+    "V13.0 起核心 STRATEGY_MODES 已凍結（V13.1 仍維持）。Walk-forward / leaderboard 僅能驗證『這組固定規則』的表現，"
     "不能再把調參過程混進同一段歷史。真正有無 edge 請看 AI戰績（append_research_snapshot 累積的盲測）。"
+    "V13.1 新增部位建議與活體儀表板，不改變選股權重。"
 )
 
 DEFAULT_MODE = "平衡"
@@ -1715,16 +1710,199 @@ def limit_up_status(price, prev_close, day_high, day_low, daily_pct=None):
     """台股簡化漲停/接近漲停判斷。
     以現有日K資料做 UI 判讀；不同股票漲跌幅制度可能不同，因此用接近漲停帶判定，
     不把它當成交易所最終撮合狀態。
+    V13.1：回傳更細的狀態，方便決策降級。
     """
     if pd.isna(price) or pd.isna(prev_close) or prev_close <= 0:
         return "未知"
     pct = ((price / prev_close) - 1) * 100 if pd.isna(daily_pct) else float(daily_pct)
     # 一般股票 10% 漲停附近，以 9.5% 作為 UI 提示帶；超過則視為漲停附近。
-    if pct >= 9.5:
+    if pct >= 9.8:
         if not pd.isna(day_high) and price >= day_high * 0.999:
             return "🔒 接近/封漲停"
+        return "🔒 接近/封漲停"
+    if pct >= 9.0:
         return "🟠 漲幅接近漲停"
     return "—"
+
+
+# =========================
+# V13.1：部位建議、曝險乘數、AI戰績狀態、組合風險
+# =========================
+def regime_exposure_multiplier(regime_tag):
+    """依大盤環境調整總曝險上限（0–1）。熊市明顯降檔，避免在不利環境硬做。"""
+    r = str(regime_tag or "UNKNOWN").upper()
+    if r == "BULL":
+        return 1.0
+    if r == "NEUTRAL":
+        return 0.70
+    if r == "BEAR":
+        return 0.40
+    return 0.55
+
+
+def suggest_position_size(
+    price,
+    atr,
+    equity=1_000_000,
+    risk_per_trade_pct=1.0,
+    stop_atr_mult=2.0,
+    regime_tag="UNKNOWN",
+    max_position_pct=15.0,
+    lot_size=1000,
+):
+    """V13.1 ATR 風險預算部位建議。
+    核心：單筆最多虧 equity × risk_per_trade_pct%；停損距離 ≈ ATR × stop_atr_mult。
+    再受 regime 曝險乘數與單檔上限約束。回傳 dict 方便 UI 顯示。
+    """
+    price = safe_float(price)
+    atr = safe_float(atr)
+    equity = max(safe_float(equity, 1_000_000), 1)
+    risk_pct = max(safe_float(risk_per_trade_pct, 1.0), 0.1)
+    stop_mult = max(safe_float(stop_atr_mult, 2.0), 0.5)
+    max_pos_pct = max(safe_float(max_position_pct, 15.0), 1.0)
+
+    if pd.isna(price) or price <= 0:
+        return {
+            "shares": 0, "lots": 0, "notional": 0.0, "risk_amount": 0.0,
+            "stop_distance": np.nan, "position_pct": 0.0, "note": "現價不足，無法估算部位",
+            "regime_mult": regime_exposure_multiplier(regime_tag),
+        }
+
+    regime_mult = regime_exposure_multiplier(regime_tag)
+    risk_amount = equity * (risk_pct / 100.0) * regime_mult
+
+    if pd.isna(atr) or atr <= 0:
+        # 無 ATR 時退回固定 % 風險（用 5% 價格距離當近似停損）
+        stop_distance = price * 0.05
+        note = "無 ATR，改用約 5% 價格距離估算"
+    else:
+        stop_distance = atr * stop_mult
+        note = f"停損距離 ≈ ATR×{stop_mult:.1f} = {stop_distance:.2f}"
+
+    if stop_distance <= 0:
+        return {
+            "shares": 0, "lots": 0, "notional": 0.0, "risk_amount": risk_amount,
+            "stop_distance": stop_distance, "position_pct": 0.0, "note": "停損距離異常",
+            "regime_mult": regime_mult,
+        }
+
+    raw_shares = risk_amount / stop_distance
+    max_shares_by_pct = (equity * (max_pos_pct / 100.0) * regime_mult) / price
+    shares = min(raw_shares, max_shares_by_pct)
+    # 台股常見 1000 股一張；不足一张则给 0（避免碎股建议）
+    lots = int(shares // lot_size)
+    shares = lots * lot_size
+    notional = shares * price
+    position_pct = (notional / equity * 100.0) if equity > 0 else 0.0
+
+    if shares <= 0:
+        note += "；風險預算下不足 1 張，建議觀望或降低風險單位"
+    else:
+        note += f"；regime 乘數 {regime_mult:.2f}"
+
+    return {
+        "shares": int(shares),
+        "lots": int(lots),
+        "notional": float(notional),
+        "risk_amount": float(risk_amount),
+        "stop_distance": float(stop_distance),
+        "position_pct": float(position_pct),
+        "note": note,
+        "regime_mult": float(regime_mult),
+    }
+
+
+def ai_performance_status(detail, cal=None, horizon="10D報酬"):
+    """V13.1：把校準 + drift 整合成單一狀態，給儀表板用。"""
+    drift = strategy_drift_report(detail, horizon=horizon) if detail is not None and not detail.empty else {
+        "status": "INSUFFICIENT", "message": "尚無可用前瞻報酬資料。"
+    }
+    n = 0 if detail is None or detail.empty else len(detail)
+    rel = calibration_reliability(n)
+    status = drift.get("status", "INSUFFICIENT")
+
+    action = "繼續累積每日盤後掃描快照，樣本不足時禁止解讀勝率。"
+    if status == "STABLE":
+        action = "策略表現在歷史合理範圍；可維持既有風險預算，仍須嚴守停損。"
+    elif status == "WATCH":
+        action = "進入觀察區：建議降低單筆風險或總曝險，並檢查近期因子是否失效。"
+    elif status == "DRIFT":
+        action = "明顯低於基準：建議大幅降低曝險或暫停新倉，優先檢視市場體制與執行滑價。"
+
+    # 高分區間粗估（若有 cal）
+    hi_win = np.nan
+    if isinstance(cal, pd.DataFrame) and not cal.empty and "10D勝率" in cal.columns:
+        hi = cal[cal["分數區間"].astype(str).isin(["80–84", "85–89", "90+"])]
+        if not hi.empty and "樣本數" in hi.columns:
+            w = pd.to_numeric(hi["樣本數"], errors="coerce").fillna(0)
+            v = pd.to_numeric(hi["10D勝率"], errors="coerce")
+            mask = w >= 5
+            if mask.sum() > 0:
+                hi_win = float((v[mask] * w[mask]).sum() / w[mask].sum())
+
+    return {
+        "status": status,
+        "message": drift.get("message", ""),
+        "action": action,
+        "n_samples": n,
+        "reliability": rel,
+        "recent_win": drift.get("recent_win"),
+        "baseline_win": drift.get("baseline_win"),
+        "win_delta": drift.get("win_delta"),
+        "hi_score_10d_win": hi_win,
+        "regime_hint": "若持續 DRIFT，優先相信前瞻數據而非回測曲線。",
+    }
+
+
+def portfolio_risk_summary(results, equity=1_000_000):
+    """V13.1：庫存健康檢查後的組合層級摘要。"""
+    if not results:
+        return {
+            "n": 0, "total_notional": 0.0, "total_upl": 0.0, "avg_confidence": np.nan,
+            "n_stop": 0, "n_profit": 0, "n_add": 0, "max_weight_pct": 0.0, "note": "無持倉結果",
+        }
+    n = len(results)
+    notionals = []
+    upls = []
+    confs = []
+    n_stop = n_profit = n_add = 0
+    for r in results:
+        mv = safe_float(r.get("市值"), np.nan)
+        if not pd.isna(mv):
+            notionals.append(mv)
+        upl = safe_float(r.get("未實現損益"), np.nan)
+        if not pd.isna(upl):
+            upls.append(upl)
+        cf = safe_float(r.get("續抱信心分"), np.nan)
+        if not pd.isna(cf):
+            confs.append(cf)
+        action = str(r.get("操作建議", ""))
+        if "停損" in action or "出清" in action:
+            n_stop += 1
+        elif "獲利了結" in action:
+            n_profit += 1
+        elif "加碼" in action or "攤平" in action:
+            n_add += 1
+    total_notional = float(sum(notionals)) if notionals else 0.0
+    total_upl = float(sum(upls)) if upls else 0.0
+    avg_conf = float(np.mean(confs)) if confs else np.nan
+    max_w = (max(notionals) / equity * 100.0) if (notionals and equity > 0) else 0.0
+    note = ""
+    if max_w >= 25:
+        note = "單檔權重偏高，注意集中度風險。"
+    elif n_stop >= max(1, n // 2):
+        note = "半數以上持倉出現停損／出清建議，請優先處理風險。"
+    return {
+        "n": n,
+        "total_notional": total_notional,
+        "total_upl": total_upl,
+        "avg_confidence": avg_conf,
+        "n_stop": n_stop,
+        "n_profit": n_profit,
+        "n_add": n_add,
+        "max_weight_pct": float(max_w),
+        "note": note,
+    }
 
 
 def format_num(x, digits=1, suffix=""):
@@ -4373,6 +4551,23 @@ st.sidebar.markdown(f"""
     {_idx_lines}
 </div>
 """, unsafe_allow_html=True)
+
+# V13.1：側邊欄顯示 AI戰績健康狀態（若已計算過）
+_perf = st.session_state.get("ai_perf_status")
+if isinstance(_perf, dict) and _perf.get("status"):
+    _ps = _perf["status"]
+    _pcolor = {"STABLE": "var(--accent-green)", "WATCH": "var(--accent-yellow)", "DRIFT": "var(--accent-red)"}.get(_ps, "var(--text-sub)")
+    _pemoji = {"STABLE": "🟢", "WATCH": "🟡", "DRIFT": "🔴", "INSUFFICIENT": "⚪"}.get(_ps, "⚪")
+    st.sidebar.markdown(f"""
+<div class="regime-card" style="border-left:4px solid {_pcolor}; margin-top:8px;">
+    <div class="regime-title">🏆 AI戰績狀態</div>
+    <div class="regime-msg">{_pemoji} <b>{_ps}</b> · 樣本 {_perf.get('n_samples', 0)}</div>
+    <div class="regime-msg" style="font-size:11.5px;opacity:.9;">{html.escape(str(_perf.get('action','')[:80]))}</div>
+</div>
+""", unsafe_allow_html=True)
+    if _ps == "DRIFT":
+        st.sidebar.warning("策略出現 DRIFT，建議降低曝險。詳見「🏆 AI戰績」。")
+
 st.sidebar.caption("Token、API 診斷、回測費率等研究員參數請至「⚙️ 系統設定」分頁調整。")
 st.sidebar.markdown("""
 <div class="legend-card">
@@ -4837,6 +5032,29 @@ def render_pick_card(row, rank=None):
     code = html.escape(str(row.get("股票代碼", "")))
     name_e = html.escape(name)
 
+    # V13.1：可買時附加 ATR 部位建議（假設資金 100 萬、單筆風險 1%）
+    pos_html = ""
+    if "🟢 可買" in _decision_str:
+        _px = safe_float(row.get("現價"))
+        _atr = safe_float(row.get("ATR"))
+        _reg = row.get("市場環境") or row.get("market_regime") or "UNKNOWN"
+        _pos = suggest_position_size(
+            price=_px, atr=_atr, equity=1_000_000, risk_per_trade_pct=1.0,
+            stop_atr_mult=2.0, regime_tag=_reg, max_position_pct=12.0,
+        )
+        if _pos.get("lots", 0) > 0:
+            pos_html = (
+                f'<div class="pick-sub" style="margin-top:6px;color:var(--accent-blue);">'
+                f'📐 參考部位（假設資金100萬、單筆風險1%）：'
+                f'<b>{_pos["lots"]} 張</b>（約 {_pos["notional"]:,.0f} 元，佔比 {_pos["position_pct"]:.1f}%）'
+                f'　·　{_pos["note"]}</div>'
+            )
+        else:
+            pos_html = (
+                f'<div class="pick-sub" style="margin-top:6px;color:var(--text-sub);">'
+                f'📐 風險預算下不足 1 張（{_pos.get("note","")}），建議觀望或提高資金／風險單位。</div>'
+            )
+
     st.markdown(f"""
     <div class="pick-card">
         <div class="pick-top">
@@ -4849,6 +5067,7 @@ def render_pick_card(row, rank=None):
             ・ 5日 <span class="{c5}">{r5}</span>
             ・ 20日 <span class="{c20}">{r20}</span></div>
         <div class="pick-sub">風險調整優先級：<b>{pri:.0f}</b> / 100</div>
+        {pos_html}
         <div class="pick-reason">{reasons_html}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -5694,6 +5913,22 @@ with tab_holdings:
 </div>
 """, unsafe_allow_html=True)
 
+        # V13.1 組合層級風險摘要
+        _prs = portfolio_risk_summary(results, equity=1_000_000)
+        _avg_cf = f"{_prs['avg_confidence']:.0f}" if not pd.isna(_prs.get("avg_confidence", np.nan)) else "—"
+        _upl = _prs.get("total_upl", 0)
+        _upl_color = "var(--accent-green)" if _upl >= 0 else "var(--accent-red)"
+        st.markdown(f"""
+<div class="stat-chip-row" style="margin-top:8px;">
+    <div class="stat-chip"><div class="sc-label">組合市值（約）</div><div class="sc-value" style="font-size:18px;">{_prs['total_notional']:,.0f}</div></div>
+    <div class="stat-chip"><div class="sc-label">未實現損益合計</div><div class="sc-value" style="font-size:18px; color:{_upl_color};">{_upl:+,.0f}</div></div>
+    <div class="stat-chip"><div class="sc-label">平均續抱信心</div><div class="sc-value" style="font-size:18px;">{_avg_cf}</div></div>
+    <div class="stat-chip"><div class="sc-label">最大單檔權重（假設100萬）</div><div class="sc-value" style="font-size:18px;">{_prs['max_weight_pct']:.1f}%</div></div>
+</div>
+""", unsafe_allow_html=True)
+        if _prs.get("note"):
+            st.caption(f"⚠️ 組合提醒：{_prs['note']}")
+
         for r in results_sorted:
             action = r.get("操作建議", "")
             if "停損" in action or "出清" in action:
@@ -5771,11 +6006,19 @@ with tab_holdings:
         st.caption("以上為量化規則參考建議（依買進分、趨勢強度 ADX、波動度 ATR 與你選擇的風險偏好動態計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
 
 with tab_verify:
-    st.subheader("🏆 AI戰績")
-    st.caption("AI戰績自動更新：不需要手動建立校準，系統會在開啟時更新歷史訊號表現。")
+    st.subheader("🏆 AI戰績（活體儀表板）")
+    st.caption(
+        "V13.1：開啟本頁即自動更新歷史訊號的前瞻表現。"
+        "狀態以「凍結參數後的真實前瞻」為準；樣本不足時禁止把勝率當機率。"
+        f"{'🔒 參數已凍結（'+PARAMS_FROZEN_AT+'）' if PARAMS_FROZEN else '⚠️ 參數未凍結'}"
+    )
     log = load_research_log()
     if log.empty:
-        st.info("尚未累積每日訊號快照。請先執行盤後深度掃描，系統會自動建立 AI 戰績資料。")
+        st.info("尚未累積每日訊號快照。請先執行「🌙 深度掃描」，系統會自動建立 AI 戰績資料。")
+        st.markdown(
+            "- 每天（或定期）跑一次盤後深度掃描 → 自動 `append_research_snapshot`\n"
+            "- 樣本累積到一定筆數後，這裡會顯示勝率、平均報酬與 **STABLE / WATCH / DRIFT** 狀態"
+        )
     else:
         max_samples = min(500, max(50, len(log)))
         cal = st.session_state.get("calibration_table", pd.DataFrame())
@@ -5785,13 +6028,59 @@ with tab_verify:
                 detail, cal = build_forward_calibration(log, max_samples=max_samples)
                 st.session_state["calibration_detail"] = detail
                 st.session_state["calibration_table"] = cal
+        # 統一狀態
+        perf = ai_performance_status(detail, cal)
+        st.session_state["ai_perf_status"] = perf
+
+        status = perf.get("status", "INSUFFICIENT")
+        status_color = {
+            "STABLE": "var(--accent-green)",
+            "WATCH": "var(--accent-yellow)",
+            "DRIFT": "var(--accent-red)",
+            "INSUFFICIENT": "var(--text-sub)",
+        }.get(status, "var(--text-sub)")
+        status_emoji = {"STABLE": "🟢", "WATCH": "🟡", "DRIFT": "🔴", "INSUFFICIENT": "⚪"}.get(status, "⚪")
+
+        st.markdown(f"""
+        <div class="regime-card" style="border-left:4px solid {status_color}; margin-bottom:14px;">
+            <div class="regime-title">策略健康狀態（以 10D 前瞻為主）</div>
+            <div class="regime-score-row">
+                <span class="regime-score" style="color:{status_color}; font-size:28px;">{status_emoji} {status}</span>
+            </div>
+            <div class="regime-msg">{html.escape(str(perf.get('message','')))}</div>
+            <div class="regime-msg" style="margin-top:8px;"><b>建議行動：</b>{html.escape(str(perf.get('action','')))}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("有效樣本", f"{perf.get('n_samples', 0):,}")
+        m2.metric("校準可靠度", perf.get("reliability", "—"))
+        rw = perf.get("recent_win")
+        bw = perf.get("baseline_win")
+        m3.metric("最近20筆勝率", f"{rw*100:.1f}%" if rw is not None and not pd.isna(rw) else "—")
+        m4.metric("歷史基準勝率", f"{bw*100:.1f}%" if bw is not None and not pd.isna(bw) else "—")
+
+        hi_win = perf.get("hi_score_10d_win")
+        if hi_win is not None and not pd.isna(hi_win):
+            st.caption(f"高分區間（80+）加權 10D 勝率約 {hi_win:.1f}%（僅供觀察，樣本不足時勿當成穩定機率）。")
+
+        if status == "DRIFT":
+            st.error("策略出現明顯失效跡象。建議降低曝險或暫停新開倉，並回到「深度掃描」檢查近期訊號品質。")
+        elif status == "WATCH":
+            st.warning("表現弱於歷史基準，進入觀察區。可暫時降低單筆風險%，並持續累積樣本。")
+        elif status == "STABLE":
+            st.success("最近表現仍在歷史合理範圍。請維持紀律，不要因單筆盈虧解凍參數。")
+
         if cal is not None and not cal.empty:
+            st.markdown("### 📊 買進分 → 實際前瞻表現")
             st.dataframe(cal.round(2), use_container_width=True, hide_index=True)
-            st.caption(f"有效樣本 {len(detail):,} 筆；可靠度：{calibration_reliability(len(detail))}。")
+            st.caption(f"有效樣本 {len(detail):,} 筆；可靠度：{calibration_reliability(len(detail))}。歷史勝率 ≠ 未來保證。")
             _pending_note = calibration_pending_note(detail)
             if _pending_note:
                 st.caption(_pending_note)
             render_calibration_detail_drilldown(detail, key_prefix="verify")
+        else:
+            st.info("校準表尚未建立完成，請稍候或重新整理頁面。")
 
 with tab_advanced:
     st.warning(
@@ -6227,4 +6516,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V13.0 · 驗證紀律 · 參數凍結 · 下市股研究宇宙 · Leaderboard 顯著性門檻 · 前瞻盲測優先 · Point-in-Time · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.1 · 驗證紀律 · 參數凍結 · ATR部位建議 · 活體AI戰績 · 組合風險摘要 · 下市股研究宇宙 · 前瞻盲測優先 · 研究輔助非投資建議")
