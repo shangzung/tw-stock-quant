@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V12.9：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
+# 台股 Quant Compass V13.0：驗證紀律版 — 參數凍結 + 下市股宇宙 + 顯著性門檻 + 前瞻盲測優先
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -11,6 +11,13 @@
 # 7. V12.8：追高防護（軟過熱／大漲日勿追）＋回檔進場價，減少買在昨日高點後隔日倒貨。
 # 8. V12.9（賺錢導向）：拉開標準／積極差異；標準提高結構+相對強度、更嚴不追高；
 #    積極必須爆量突破確認才給可買、未確認起漲分大幅打折；減少兩模式前排重複與假訊號。
+# 9. V13.0（驗證紀律）：
+#    - 核心 STRATEGY_MODES 參數凍結（PARAMS_FROZEN=True），禁止因單筆虧損再手動調權重
+#    - 研究宇宙可合併 FinMind 下市股（TaiwanStockDelisting），降低生存者偏差
+#    - strategy_leaderboard 加入交易筆數門檻 + bootstrap 勝率/報酬信賴區間，樣本不足不排名
+#    - calibration 可靠度門檻提高；「最佳區間」需足夠樣本才顯示
+#    - 流動性門檻略升（MIN_AVG_TURNOVER），減少薄量股假滑價
+#    真正 edge 只能靠凍結參數後的真實前瞻累積（AI戰績），不是再調規則。
 # ------------------------------------------------------------
 
 import time
@@ -263,11 +270,18 @@ def render_calibration_detail_drilldown(detail, key_prefix):
 
 
 def calibration_reliability(n):
+    """V13.0：門檻提高。n<50 視為不足以談勝率；n>=200 才稱『高』。"""
     n = int(n or 0)
-    if n >= 200: return "高"
-    if n >= 80: return "中"
-    if n >= 30: return "低"
-    return "極低"
+    if n >= 200: return "高（可初步討論資訊價值）"
+    if n >= 100: return "中（仍易受單一行情主導）"
+    if n >= 50: return "低（僅供觀察，不可當機率）"
+    return "極低（樣本不足，禁止解讀勝率）"
+
+# Leaderboard / 校準共用：少於此筆數的策略不進排名、不宣告「最佳」
+MIN_TRADES_FOR_RANK = 30
+MIN_SAMPLES_FOR_BEST_BUCKET = 30
+BOOTSTRAP_ITERS = 500
+BOOTSTRAP_CI = 0.90
 
 def load_saved_token():
     try:
@@ -1322,6 +1336,16 @@ STRATEGY_MODES = {
         "desc": "積極模式（賺錢導向）：僅在爆量＋收盤位置確認突破時給可買，追求非對稱報酬、嚴格控假突破。",
     },
 }
+
+# V13.0：參數凍結旗標。True 時核心權重/門檻視為已鎖定，研究結論應建立在「凍結後的真實前瞻」上，
+# 而不是再因單筆虧損或名單重疊去改數字。若必須解凍，改 False 並在註解寫明原因與日期。
+PARAMS_FROZEN = True
+PARAMS_FROZEN_AT = "2026-09-03"
+PARAMS_FROZEN_NOTE = (
+    "V13.0 起核心 STRATEGY_MODES 已凍結。Walk-forward / leaderboard 僅能驗證『這組固定規則』的表現，"
+    "不能再把調參過程混進同一段歷史。真正有無 edge 請看 AI戰績（append_research_snapshot 累積的盲測）。"
+)
+
 DEFAULT_MODE = "平衡"
 
 # UI 顯示用標籤 ↔ 內部 mode key（只保留標準／積極兩種邏輯）
@@ -1791,6 +1815,7 @@ def get_daily(stock_id, days=500):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _get_stock_universe_cached():
+    """現行掛牌股票（日常掃描用）。仍有生存者偏差——研究回測請改用 get_research_universe。"""
     info = get_finmind_api().taiwan_stock_info()
     throttle()
     if info is None or info.empty:
@@ -1804,7 +1829,9 @@ def _get_stock_universe_cached():
     if "type" in info.columns:
         info = info[info["type"].astype(str).str.lower().isin(["twse", "tpex"])]
     keep_cols = [c for c in ["stock_id", "stock_name", "industry_category", "type"] if c in info.columns]
-    return info[keep_cols].drop_duplicates("stock_id").reset_index(drop=True)
+    out = info[keep_cols].drop_duplicates("stock_id").reset_index(drop=True)
+    out["is_delisted"] = False
+    return out
 
 def get_stock_universe():
     try:
@@ -1812,6 +1839,72 @@ def get_stock_universe():
     except Exception as e:
         _log_api_error("taiwan_stock_info", "-", e)
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _get_delisted_stocks_cached():
+    """FinMind TaiwanStockDelisting：下市櫃清單，用來降低研究回測的生存者偏差。"""
+    api = get_finmind_api()
+    df = None
+    try:
+        if hasattr(api, "taiwan_stock_delisting"):
+            df = api.taiwan_stock_delisting()
+        else:
+            # 相容：直接打 dataset
+            df = api.get_data(dataset="TaiwanStockDelisting") if hasattr(api, "get_data") else None
+        throttle()
+    except Exception as e:
+        _log_api_error("taiwan_stock_delisting", "-", e)
+        return pd.DataFrame(columns=["stock_id", "stock_name", "delist_date", "is_delisted"])
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["stock_id", "stock_name", "delist_date", "is_delisted"])
+    out = df.copy()
+    out["stock_id"] = out["stock_id"].astype(str)
+    out = out[out["stock_id"].str.match(r"^\d{4}$", na=False)]
+    out = out[~out["stock_id"].str.startswith("00")]
+    if "date" in out.columns:
+        out["delist_date"] = pd.to_datetime(out["date"], errors="coerce")
+    else:
+        out["delist_date"] = pd.NaT
+    name_col = "stock_name" if "stock_name" in out.columns else None
+    keep = out[["stock_id"]].copy()
+    keep["stock_name"] = out[name_col] if name_col else out["stock_id"]
+    keep["delist_date"] = out["delist_date"]
+    keep["industry_category"] = "下市櫃"
+    keep["type"] = "delisted"
+    keep["is_delisted"] = True
+    return keep.drop_duplicates("stock_id").reset_index(drop=True)
+
+
+def get_delisted_stocks():
+    try:
+        return _get_delisted_stocks_cached()
+    except Exception as e:
+        _log_api_error("get_delisted_stocks", "-", e)
+        return pd.DataFrame()
+
+
+def get_research_universe(include_delisted=True):
+    """研究/回測專用宇宙：現行掛牌 ∪ 下市股，降低生存者偏差。
+    日常掃描仍用 get_stock_universe()（只要活股）。
+    注意：下市股歷史價格可能不完整，回測時無資料的會被自然略過。
+    """
+    live = get_stock_universe()
+    if not include_delisted:
+        return live
+    dead = get_delisted_stocks()
+    if dead is None or dead.empty:
+        return live
+    # 避免與現行重複（極少數代碼重用情境：保留 live）
+    live_ids = set(live["stock_id"].astype(str)) if not live.empty else set()
+    dead = dead[~dead["stock_id"].astype(str).isin(live_ids)]
+    cols = ["stock_id", "stock_name", "industry_category", "type", "is_delisted"]
+    for c in cols:
+        if c not in live.columns:
+            live[c] = False if c == "is_delisted" else ""
+        if c not in dead.columns:
+            dead[c] = True if c == "is_delisted" else ""
+    return pd.concat([live[cols], dead[cols]], ignore_index=True).drop_duplicates("stock_id").reset_index(drop=True)
 
 @st.cache_data(ttl=EOD_CACHE_TTL, show_spinner=False)
 def _get_revenue_cached(stock_id, days):
@@ -3152,7 +3245,7 @@ def breakout_score(df):
 
     return round(clamp(score), 1), reasons
 
-MIN_AVG_TURNOVER = 5_000_000  # 20日均成交金額門檻（元）；V12.7 略提高，減少薄量假訊號
+MIN_AVG_TURNOVER = 8_000_000  # 20日均成交金額門檻（元）；V13.0 再提高，減少薄量股假滑價
 
 def passes_liquidity_gate(daily):
     """第一層：不評分，只做『值不值得繼續分析』的過濾。
@@ -4001,9 +4094,34 @@ def strategy_compare_report(stock_id, initial_capital, fee, tax, slippage, start
     return out
 
 
+def _bootstrap_ci(values, stat_fn, iters=None, ci=None, seed=42):
+    """簡單 percentile bootstrap 信賴區間。樣本太少時回傳 (nan, nan)。"""
+    iters = int(iters or BOOTSTRAP_ITERS)
+    ci = float(ci or BOOTSTRAP_CI)
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < 10:
+        return np.nan, np.nan
+    rng = np.random.default_rng(seed)
+    stats = []
+    n = len(arr)
+    for _ in range(iters):
+        sample = arr[rng.integers(0, n, size=n)]
+        try:
+            stats.append(float(stat_fn(sample)))
+        except Exception:
+            continue
+    if len(stats) < 20:
+        return np.nan, np.nan
+    alpha = (1.0 - ci) / 2.0
+    lo, hi = np.quantile(stats, [alpha, 1.0 - alpha])
+    return float(lo), float(hi)
+
+
 def strategy_leaderboard(stocks, initial_capital, fee, tax, slippage, start_date=None, end_date=None, combos=None, progress_cb=None, max_workers=3):
-    """對多檔股票 × 多種策略組合跑回測，把同一組合底下所有股票的交易『合併計算』，
-    統計勝率、平均報酬、最大回撤、Profit Factor、CAGR，找出真正有效的模式。
+    """對多檔股票 × 多種策略組合跑回測，合併交易後統計。
+    V13.0：交易筆數 < MIN_TRADES_FOR_RANK 標為樣本不足、不進有效排名；
+    勝率與平均報酬附 bootstrap 信賴區間，避免把噪音當 edge。
     """
     combos = combos or STRATEGY_COMBOS
     jobs = [(s, sm, md) for s in stocks for sm, md in combos]
@@ -4031,29 +4149,63 @@ def strategy_leaderboard(stocks, initial_capital, fee, tax, slippage, start_date
     rows = []
     for (sm, md), agg in by_combo.items():
         trades = agg["trades"]
+        label = f"{sm}/{md}"
         if not trades:
-            rows.append({"策略": f"{sm}{md}", "交易筆數": 0, "勝率(%)": np.nan, "平均報酬(%)": np.nan,
-                         "最大回撤(%)": np.nan, "Profit Factor": np.nan, "CAGR(%)": np.nan})
+            rows.append({"策略": label, "交易筆數": 0, "樣本足夠": "否", "勝率(%)": np.nan,
+                         "勝率CI低": np.nan, "勝率CI高": np.nan,
+                         "平均報酬(%)": np.nan, "報酬CI低": np.nan, "報酬CI高": np.nan,
+                         "最大回撤(%)": np.nan, "Profit Factor": np.nan, "CAGR(%)": np.nan,
+                         "可排名": False})
             continue
         pnls = [float(t.get("pnl", 0)) for t in trades]
-        rets = [(t["exit"]/t["entry"]-1)*100 for t in trades]
+        rets = [(t["exit"]/t["entry"]-1)*100 for t in trades if t.get("entry") and t.get("exit")]
         wins = [p for p in pnls if p > 0]; losses = [p for p in pnls if p <= 0]
+        n = len(trades)
+        win_rate = (len(wins) / n * 100) if n else np.nan
+        mean_ret = float(np.mean(rets)) if rets else np.nan
         pf = (sum(wins)/abs(sum(losses))) if losses and sum(losses) != 0 else np.nan
-        # 用組合內所有股票的權益曲線等權重合成一條曲線來估 CAGR / MDD，避免單一大賺股票蓋掉全貌
+        # bootstrap CI
+        win_flags = np.array([1.0 if p > 0 else 0.0 for p in pnls])
+        wr_lo, wr_hi = _bootstrap_ci(win_flags, lambda x: float(np.mean(x) * 100))
+        rt_lo, rt_hi = _bootstrap_ci(rets, lambda x: float(np.mean(x)))
         cagr = np.nan; mdd = np.nan
         if agg["equities"]:
-            norm = [eq/eq.iloc[0] for eq in agg["equities"]]
-            combo_eq = pd.concat(norm, axis=1).ffill().bfill().mean(axis=1)
-            m = performance_metrics(combo_eq)
-            cagr = m.get("cagr", np.nan) * 100 if not pd.isna(m.get("cagr", np.nan)) else np.nan
-            mdd = m.get("mdd", np.nan) * 100 if not pd.isna(m.get("mdd", np.nan)) else np.nan
-        rows.append({"策略": f"{sm}{md}", "交易筆數": len(trades), "勝率(%)": round(len(wins)/len(trades)*100, 1),
-                     "平均報酬(%)": round(float(np.mean(rets)), 2), "最大回撤(%)": round(mdd, 2) if not pd.isna(mdd) else np.nan,
-                     "Profit Factor": round(pf, 2) if not pd.isna(pf) else np.nan, "CAGR(%)": round(cagr, 2) if not pd.isna(cagr) else np.nan})
+            norm = [eq/eq.iloc[0] for eq in agg["equities"] if eq is not None and len(eq) and eq.iloc[0] != 0]
+            if norm:
+                combo_eq = pd.concat(norm, axis=1).ffill().bfill().mean(axis=1)
+                m = performance_metrics(combo_eq)
+                cagr = m.get("cagr", np.nan) * 100 if not pd.isna(m.get("cagr", np.nan)) else np.nan
+                mdd = m.get("mdd", np.nan) * 100 if not pd.isna(m.get("mdd", np.nan)) else np.nan
+        enough = n >= MIN_TRADES_FOR_RANK
+        rows.append({
+            "策略": label, "交易筆數": n, "樣本足夠": "是" if enough else "否",
+            "勝率(%)": round(win_rate, 1) if not pd.isna(win_rate) else np.nan,
+            "勝率CI低": round(wr_lo, 1) if not pd.isna(wr_lo) else np.nan,
+            "勝率CI高": round(wr_hi, 1) if not pd.isna(wr_hi) else np.nan,
+            "平均報酬(%)": round(mean_ret, 2) if not pd.isna(mean_ret) else np.nan,
+            "報酬CI低": round(rt_lo, 2) if not pd.isna(rt_lo) else np.nan,
+            "報酬CI高": round(rt_hi, 2) if not pd.isna(rt_hi) else np.nan,
+            "最大回撤(%)": round(mdd, 2) if not pd.isna(mdd) else np.nan,
+            "Profit Factor": round(pf, 2) if not pd.isna(pf) else np.nan,
+            "CAGR(%)": round(cagr, 2) if not pd.isna(cagr) else np.nan,
+            "可排名": enough,
+        })
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(["Profit Factor", "平均報酬(%)"], ascending=False, na_position="last").reset_index(drop=True)
-        out.insert(0, "排名", np.arange(1, len(out)+1))
+        # 只有樣本足夠的才排真正名次；不足的排在後面且排名空白
+        ranked = out[out["可排名"] == True].sort_values(
+            ["Profit Factor", "平均報酬(%)"], ascending=False, na_position="last"
+        )
+        unranked = out[out["可排名"] == False].sort_values("交易筆數", ascending=False)
+        ranked = ranked.copy()
+        if not ranked.empty:
+            ranked.insert(0, "排名", np.arange(1, len(ranked) + 1))
+        else:
+            ranked.insert(0, "排名", pd.Series(dtype=float))
+        unranked = unranked.copy()
+        unranked.insert(0, "排名", np.nan)
+        out = pd.concat([ranked, unranked], ignore_index=True)
+        out = out.drop(columns=["可排名"], errors="ignore")
     return out
 
 
@@ -4581,6 +4733,14 @@ with tab_help:
 #     即使它在畫面上排在最後一個分頁也一樣）---
 with tab_settings:
     st.subheader("⚙️ 系統設定")
+    if PARAMS_FROZEN:
+        st.success(
+            f"🔒 **參數已凍結**（{PARAMS_FROZEN_AT}）。核心 STRATEGY_MODES 權重/門檻鎖定中。"
+            "請用每日盤後掃描累積 AI戰績做真盲測；不要因單筆虧損再改規則。"
+        )
+        st.caption(PARAMS_FROZEN_NOTE)
+    else:
+        st.warning("⚠️ 參數未凍結。任何手動改權重都會污染之後的驗證。確認規則後請將 PARAMS_FROZEN 設為 True。")
     st.caption("Token、API 診斷、回測費率、投組持股數都在這裡——日常用「今日機會／深度掃描」即可，一般不用開設定。")
     render_settings_tab()
 
@@ -5912,7 +6072,11 @@ with tab_advanced:
     with sub_leaderboard:
         st.subheader("🏆 策略排行榜")
         st.caption("對多檔股票 × 多種策略組合跑回測，把每個組合底下的所有交易合併統計，找出真正有效的模式。")
-        lb_preset = st.radio("測試清單", ["常用四檔(2330/5351/3481/2454)", "我的追蹤清單", "自訂輸入", "全市場抽樣"], horizontal=True, key="lb_preset")
+        lb_preset = st.radio(
+            "測試清單",
+            ["常用四檔(2330/5351/3481/2454)", "我的追蹤清單", "自訂輸入", "全市場抽樣(僅活股)", "研究宇宙抽樣(含下市)"],
+            horizontal=True, key="lb_preset",
+        )
         if lb_preset == "常用四檔(2330/5351/3481/2454)":
             lb_stocks = ["2330", "5351", "3481", "2454"]
         elif lb_preset == "我的追蹤清單":
@@ -5920,9 +6084,16 @@ with tab_advanced:
         elif lb_preset == "自訂輸入":
             lb_text = st.text_area("股票代碼（逗號或換行分隔）", value="2330, 5351, 3481, 2454", key="lb_custom")
             lb_stocks = clean_stock_list(lb_text)
+        elif lb_preset == "研究宇宙抽樣(含下市)":
+            lb_sample_n = st.slider("研究宇宙抽樣檔數", 10, 120, 40, 10, key="lb_sample_n_research",
+                                     help="含下市股，降低生存者偏差。下市股若無足夠歷史價會被自然略過。")
+            uni_lb = get_research_universe(include_delisted=True)
+            n_dead = int(uni_lb["is_delisted"].sum()) if (not uni_lb.empty and "is_delisted" in uni_lb.columns) else 0
+            st.caption(f"研究宇宙約 {len(uni_lb)} 檔（其中下市約 {n_dead} 檔）。數字通常會比「僅活股」難看，這才接近真實。")
+            lb_stocks = uni_lb["stock_id"].sample(n=min(lb_sample_n, len(uni_lb)), random_state=int(datetime.now().strftime("%Y%m%d"))).tolist() if not uni_lb.empty else []
         else:
             lb_sample_n = st.slider("全市場抽樣檔數", 10, 100, 30, 10, key="lb_sample_n",
-                                     help="全市場檔數太多，逐檔跑四種組合回測會消耗大量 FinMind 額度與時間，先用抽樣估計模式優劣。")
+                                     help="僅現行掛牌，有生存者偏差；正式研究請改用「研究宇宙抽樣」。")
             uni_lb = get_stock_universe()
             lb_stocks = uni_lb["stock_id"].sample(n=min(lb_sample_n, len(uni_lb)), random_state=int(datetime.now().strftime("%Y%m%d"))).tolist() if not uni_lb.empty else []
         lc1, lc2 = st.columns(2)
@@ -5940,9 +6111,26 @@ with tab_advanced:
         lb_res = st.session_state.get("strategy_leaderboard_res")
         if lb_res is not None and not lb_res.empty:
             st.dataframe(lb_res, use_container_width=True, hide_index=True)
-            top = lb_res.iloc[0]
-            st.success(f"🏆 目前清單裡表現最好的模式：**{top['策略']}**（勝率 {top['勝率(%)']}%、平均報酬 {top['平均報酬(%)']}%、Profit Factor {top['Profit Factor']}）。樣本數 {top['交易筆數']} 筆，樣本越少統計越不穩定。")
-            st.caption("CAGR／最大回撤是把清單內所有股票的權益曲線等權重合成後估算，避免單一大漲股票蓋掉整體結果；交易筆數太少（例如個位數）時，勝率與 PF 僅供參考。")
+            eligible = lb_res[lb_res["樣本足夠"] == "是"] if "樣本足夠" in lb_res.columns else lb_res.iloc[0:0]
+            if eligible.empty:
+                st.warning(
+                    f"⚠️ 所有策略的交易筆數都 < {MIN_TRADES_FOR_RANK}，**不宣告最佳模式**。"
+                    "請擴大股票清單或拉長回測區間後再比；小樣本排名沒有統計意義。"
+                )
+            else:
+                top = eligible.iloc[0]
+                ci_note = ""
+                if "勝率CI低" in top and not pd.isna(top.get("勝率CI低")):
+                    ci_note = f"；勝率 90% CI [{top['勝率CI低']}%, {top['勝率CI高']}%]"
+                st.success(
+                    f"🏆 樣本足夠（≥{MIN_TRADES_FOR_RANK} 筆）且排名第一：**{top['策略']}**"
+                    f"（勝率 {top['勝率(%)']}%{ci_note}、平均報酬 {top['平均報酬(%)']}%、PF {top['Profit Factor']}、n={top['交易筆數']}）。"
+                )
+            st.caption(
+                f"V13.0：交易筆數 < {MIN_TRADES_FOR_RANK} 標「樣本足夠=否」且不進排名；"
+                "勝率/平均報酬附 bootstrap 90% 信賴區間。CAGR／MDD 為等權合成權益曲線。"
+                "歷史回測仍受生存者偏差與參數凍結前擬合影響，真正 edge 請看 AI戰績盲測。"
+            )
 
     with sub_portfolio:
         st.subheader("💼 投組回測：真實成本 + 換股成本")
@@ -5960,7 +6148,12 @@ with tab_advanced:
     with sub_wf:
         st.info("一般使用者建議查看 🏆 AI戰績；以下為研究人員進階驗證工具。")
         st.subheader("🧪 Walk-Forward / Out-of-Sample")
-        st.markdown("**目的：** 不讓同一段歷史同時扮演訓練與驗證角色。現在會依訓練年數建立 rolling 時間切點，測試區間完全封存；本版不在訓練區自動調參，因此不把報告式訓練期冒充成最佳化結果。")
+        st.markdown(
+            "**目的：** 不讓同一段歷史同時扮演訓練與驗證角色。"
+            "訓練區只建立時間切點，測試區完全封存；**不在訓練區自動調參**。"
+            f"{'🔒 目前 PARAMS_FROZEN=True（凍結於 '+PARAMS_FROZEN_AT+'），OOS 測的是固定規則，不是調參後再測。' if PARAMS_FROZEN else '⚠️ 參數未凍結，OOS 數字仍可能受手動擬合影響。'}"
+        )
+        st.caption(PARAMS_FROZEN_NOTE if PARAMS_FROZEN else "建議盡快凍結參數，把乾淨樣本外留給真實前瞻。")
         if st.button("🧪 執行 OOS 驗證",type="primary"):
             with st.spinner("執行多標的 OOS 驗證..."):
                 st.session_state["wf_res"]=walk_forward_test(stocks,initial_capital,fee,tax,slippage,hold_days=hold_days)
@@ -5971,7 +6164,7 @@ with tab_advanced:
 
     with sub_strategy:
         st.subheader("🧠 策略驗證中心")
-        st.caption("把每日買進分訊號轉成 5 / 10 / 20 個交易日的前瞻報酬，檢查分數是否真的有資訊價值；歷史勝率不是未來保證。")
+        st.caption("把每日買進分訊號轉成 5 / 10 / 20 個交易日的前瞻報酬，檢查分數是否真的有資訊價值；歷史勝率不是未來保證。V13.0：參數已凍結時，此處累積的才是乾淨盲測樣本。")
         log = load_research_log()
         if log.empty:
             st.info("尚未累積每日訊號快照。請先每天執行「盤後深度掃描」，系統會自動留下研究紀錄。")
@@ -6004,8 +6197,10 @@ with tab_advanced:
                     st.caption(_pending_note)
                 render_calibration_detail_drilldown(detail, key_prefix="advanced")
                 if "10D平均報酬" in cal.columns:
-                    eligible = cal[cal["樣本數"] >= max(10, int(total * 0.03))]
-                    if not eligible.empty:
+                    eligible = cal[cal["樣本數"] >= max(MIN_SAMPLES_FOR_BEST_BUCKET, int(total * 0.05))]
+                    if eligible.empty:
+                        st.info(f"尚無任何分數區間達到「最佳」宣告門檻（至少 {MIN_SAMPLES_FOR_BEST_BUCKET} 筆）。請繼續累積 AI戰績快照。")
+                    else:
                         best = eligible.sort_values("10D平均報酬", ascending=False).iloc[0]
                         a,b,c,d = st.columns(4)
                         a.metric("最佳 10D 分數區間", best["分數區間"])
@@ -6032,4 +6227,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V12.9 · 賺錢導向 · 追高防護／回檔進場 · 標準高勝率／積極確認突破 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.0 · 驗證紀律 · 參數凍結 · 下市股研究宇宙 · Leaderboard 顯著性門檻 · 前瞻盲測優先 · Point-in-Time · 研究輔助非投資建議")
