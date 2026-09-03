@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V12.6：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
+# 台股 Quant Compass V12.7：今日機會 + 深度掃描 + PIT 回測 + 統一買進分 + 新手優先 UI + Benchmark + Walk-Forward
 # ------------------------------------------------------------
 # 修正說明：
 # 1. 更新 FinMind API 方法名稱 (taiwan_stock_daily, taiwan_stock_financial_statement)
@@ -7,6 +7,7 @@
 # 3. 側邊欄新增「API 診斷」面板
 # 4. 統一 market_prefilter 與 calculate_stock_at 的 get_daily 天數參數為 600，避免重複消耗 API 額度。
 # 5. V12.6：拿掉「保守」；標準／積極改為兩套選股邏輯（權重＋技術偏好），不只門檻差異。
+# 6. V12.7：相對大盤強度、積極突破確認、校準動態門檻、流動性加嚴，提升訊號品質。
 # ------------------------------------------------------------
 
 import time
@@ -1085,7 +1086,7 @@ st.markdown("""
   <div class="brand-block">
     <div class="brand-mark">✦</div>
     <div>
-      <div class="brand-title">QUANT COMPASS <span>V12.6</span></div>
+      <div class="brand-title">QUANT COMPASS <span>V12.7</span></div>
       <div class="brand-sub">新手也能一眼看懂 · 台股量化決策終端</div>
     </div>
   </div>
@@ -1349,21 +1350,160 @@ def get_mode_params(mode):
     return STRATEGY_MODES.get(normalize_mode(mode), STRATEGY_MODES[DEFAULT_MODE])
 
 
-def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE):
+def relative_strength_score(stock_ret20, mkt_ret20):
+    """個股 20 日報酬相對大盤的強度，回傳 0–100 與相對超額（百分點）。
+    用來過濾『大盤跌、個股也弱但技術分仍高』的假強勢。
+    """
+    sr = safe_float(stock_ret20, np.nan)
+    mr = safe_float(mkt_ret20, np.nan)
+    if pd.isna(sr):
+        return 50.0, np.nan
+    if pd.isna(mr):
+        # 沒有大盤時，只依自身漲幅給溫和分數
+        if sr >= 0.12: return 72.0, np.nan
+        if sr >= 0.05: return 62.0, np.nan
+        if sr >= 0: return 55.0, np.nan
+        if sr >= -0.05: return 45.0, np.nan
+        return 35.0, np.nan
+    excess = (sr - mr) * 100  # 百分點
+    # 超額 +8% 以上偏強；-5% 以下偏弱
+    if excess >= 12: score = 90
+    elif excess >= 8: score = 80
+    elif excess >= 4: score = 70
+    elif excess >= 1: score = 60
+    elif excess >= -2: score = 50
+    elif excess >= -5: score = 38
+    else: score = 25
+    return float(score), float(excess)
+
+
+def aggressive_breakout_confirmed(daily):
+    """積極模式突破確認：減少當沖假突破。
+    條件（需多數成立）：
+      1) 收在當日高低區間上半（>50%）
+      2) 量比 >= 1.5
+      3) 收盤接近或突破 20 日高、或站上 MA20
+      4) 若跳空開高，收盤不得收在當日下三分之一（避免跳空失敗）
+    回傳 (confirmed: bool, reasons: list[str], confirm_score 0-100)
+    """
+    if daily is None or daily.empty or len(daily) < 25:
+        return False, ["資料不足"], 0.0
+    x = daily.iloc[-1]
+    prev = daily.iloc[-2]
+    o, h, l, c = [safe_float(x.get(k)) for k in ("open", "max", "min", "close")]
+    prev_c = safe_float(prev.get("close"))
+    vol_ratio = safe_float(x.get("VOL_RATIO"), 1.0)
+    ma20 = safe_float(x.get("MA20"))
+    high20 = safe_float(x.get("HIGH_20"))
+    reasons, pts = [], 0
+
+    rng = (h - l) if (not pd.isna(h) and not pd.isna(l)) else 0
+    close_pos = (c - l) / rng if rng and rng > 0 and not pd.isna(c) else np.nan
+    if not pd.isna(close_pos) and close_pos >= 0.55:
+        pts += 30; reasons.append("收在區間上半")
+    elif not pd.isna(close_pos) and close_pos >= 0.45:
+        pts += 12
+
+    if vol_ratio >= 2.0:
+        pts += 30; reasons.append("爆量確認")
+    elif vol_ratio >= 1.5:
+        pts += 20; reasons.append("量能放大")
+    elif vol_ratio >= 1.2:
+        pts += 8
+
+    near_high = (not pd.isna(high20) and not pd.isna(c) and high20 > 0 and c >= high20 * 0.97)
+    above_ma = (not pd.isna(ma20) and not pd.isna(c) and c > ma20)
+    if near_high:
+        pts += 25; reasons.append("接近/突破20日高")
+    elif above_ma:
+        pts += 15; reasons.append("站上MA20")
+
+    gap_pct = (o / prev_c - 1) * 100 if (not pd.isna(prev_c) and prev_c > 0 and not pd.isna(o)) else 0
+    if gap_pct >= 2.0:
+        if not pd.isna(close_pos) and close_pos < 0.33:
+            pts -= 25; reasons.append("跳空後收弱")
+        elif not pd.isna(close_pos) and close_pos >= 0.5:
+            pts += 10; reasons.append("跳空後收強")
+
+    confirmed = pts >= 55 and (near_high or above_ma) and vol_ratio >= 1.2
+    return bool(confirmed), reasons[:4], float(clamp(pts))
+
+
+def calibration_threshold_adjust(mode=DEFAULT_MODE):
+    """用 AI 戰績（若已累積）動態微調買進門檻。
+    - 高分區間 10D 勝率明顯偏低 → 提高門檻（更嚴）
+    - 勝率健康 → 不調整
+    沒有足夠樣本時回傳 0，不干擾。
+    """
+    try:
+        cal = None
+        if "calibration_table" in st.session_state:
+            cal = st.session_state.get("calibration_table")
+        if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty):
+            return 0.0, "無校準資料"
+        if not isinstance(cal, pd.DataFrame) or "分數區間" not in cal.columns:
+            return 0.0, "校準格式不足"
+        # 取 80+ 區間的 10D 勝率
+        hi = cal[cal["分數區間"].astype(str).isin(["80–84", "85–89", "90+"])]
+        if hi.empty or "10D勝率" not in hi.columns:
+            return 0.0, "高分區間樣本不足"
+        # 樣本加權
+        if "樣本數" in hi.columns:
+            w = pd.to_numeric(hi["樣本數"], errors="coerce").fillna(0)
+            v = pd.to_numeric(hi["10D勝率"], errors="coerce")
+            mask = w >= 5
+            if mask.sum() == 0:
+                return 0.0, "樣本過少"
+            win = float((v[mask] * w[mask]).sum() / w[mask].sum())
+            n = int(w[mask].sum())
+        else:
+            v = pd.to_numeric(hi["10D勝率"], errors="coerce").dropna()
+            if len(v) == 0:
+                return 0.0, "無勝率"
+            win, n = float(v.mean()), len(v)
+        # 勝率以 % 表示
+        if n < 20:
+            return 0.0, f"樣本{n}不足20"
+        if win < 42:
+            adj = 6.0 if normalize_mode(mode) == "積極" else 5.0
+            return adj, f"高分10D勝率{win:.0f}%偏低，門檻+{adj:.0f}"
+        if win < 48:
+            adj = 3.0 if normalize_mode(mode) == "積極" else 2.0
+            return adj, f"高分10D勝率{win:.0f}%偏弱，門檻+{adj:.0f}"
+        if win >= 58:
+            adj = -2.0  # 略放寬，仍保守
+            return adj, f"高分10D勝率{win:.0f}%健康，門檻{adj:.0f}"
+        return 0.0, f"高分10D勝率{win:.0f}%正常"
+    except Exception as e:
+        return 0.0, f"校準讀取失敗:{type(e).__name__}"
+
+
+def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE,
+                   breakout_ok=True, rs_excess=None, threshold_adj=0.0):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
-    分數代表條件整體強弱，不是保證未來報酬率。
-    mode：標準/積極，門檻與評分權重皆不同（見 calculate_stock_snapshot）。
+    V12.7：納入突破確認、相對強度與校準動態門檻。
     """
     mp = get_mode_params(mode)
+    buy_th = mp["eod_buy_threshold"] + safe_float(threshold_adj, 0)
+    watch_th = mp["eod_watch_threshold"] + max(0, safe_float(threshold_adj, 0) * 0.5)
     if limit_up:
         return "⚠️ 漲停勿追"
     if overheat:
         return "🟡 過熱觀察"
-    if market_regime == "BEAR" and score < mp["eod_buy_threshold"] - 5:
+    if market_regime == "BEAR" and score < buy_th - 5:
         return "🔴 不買"
-    if score >= mp["eod_buy_threshold"]:
+    # 積極模式：未通過突破確認時，即使分數達標也最多「觀察」
+    if normalize_mode(mode) == "積極" and score >= buy_th and not breakout_ok:
+        return "🟡 觀察"
+    # 相對大盤明顯弱勢：標準模式不給可買；積極模式需更高分
+    if not pd.isna(safe_float(rs_excess)):
+        if safe_float(rs_excess) <= -6 and score < buy_th + 8:
+            if score >= watch_th:
+                return "🟡 觀察"
+            return "🔴 不買"
+    if score >= buy_th:
         return "🟢 可買"
-    if score >= mp["eod_watch_threshold"]:
+    if score >= watch_th:
         return "🟡 觀察"
     return "🔴 不買"
 
@@ -2289,7 +2429,16 @@ def hot_stock_signal_from_daily(daily_ind, mode=DEFAULT_MODE):
     close_pos = (c - l) / rng * 100 if (rng and rng > 0 and not pd.isna(c)) else np.nan
 
     mp = get_mode_params(mode)
-    if score >= mp["reaction_threshold"]:
+    # V12.7：積極模式要求收盤位置與量能同時達標，減少假突破
+    confirmed_reaction = True
+    if normalize_mode(mode) == "積極":
+        confirmed_reaction = (
+            (not pd.isna(close_pos) and close_pos >= 55)
+            and (not pd.isna(vol_mult) and vol_mult >= 1.5)
+        )
+        if not confirmed_reaction:
+            score = score * 0.75
+    if score >= mp["reaction_threshold"] and confirmed_reaction:
         label = "🔥 反應強訊號"
     elif score >= mp["reaction_threshold"] * 0.6:
         label = "🟡 醞釀中"
@@ -2303,6 +2452,7 @@ def hot_stock_signal_from_daily(daily_ind, mode=DEFAULT_MODE):
         "收盤位置%": round(close_pos, 1) if not pd.isna(close_pos) else np.nan,
         "反應訊號日": pd.Timestamp(row["date"]).strftime("%Y-%m-%d") if "date" in row.index and pd.notna(row.get("date")) else None,
         "找飆股訊號": label,
+        "突破確認": "是" if confirmed_reaction else "否",
     }
 
 
@@ -2723,9 +2873,11 @@ def add_technical_indicators(df):
 
     df["VOL_MA20"] = df["volume"].rolling(20).mean() if "volume" in df.columns else np.nan
     df["VOL_RATIO"] = df["volume"] / df["VOL_MA20"] if "volume" in df.columns else 1.0
+    df["RET_5"] = df["close"].pct_change(5)
     df["RET_20"] = df["close"].pct_change(20)
     df["HIGH_20"] = df["close"].rolling(20).max()
     df["HIGH_60"] = df["close"].rolling(60).max()
+    df["LOW_20"] = df["close"].rolling(20).min()
     return df
 
 # =========================
@@ -2932,7 +3084,7 @@ def breakout_score(df):
 
     return round(clamp(score), 1), reasons
 
-MIN_AVG_TURNOVER = 3_000_000  # 20日均成交金額門檻（元），低於此視為流動性不足，不值得浪費 API 額度
+MIN_AVG_TURNOVER = 5_000_000  # 20日均成交金額門檻（元）；V12.7 略提高，減少薄量假訊號
 
 def passes_liquidity_gate(daily):
     """第一層：不評分，只做『值不值得繼續分析』的過濾。
@@ -2953,6 +3105,15 @@ def passes_liquidity_gate(daily):
     # 近 20 日完全沒有成交量變化（長期無交易/下市疑慮）
     if vol20.fillna(0).sum() <= 0:
         return False, "長期無成交"
+    # V12.7：近 5 日至少有實際成交，避免長期冷門偶發放量
+    vol5 = daily["volume"].tail(5).fillna(0)
+    if float(vol5.sum()) <= 0:
+        return False, "近五日無成交"
+    # 單日異常暴量但均量仍偏低時，不視為可交易
+    last_vol = safe_float(x.get("volume"), 0)
+    avg_vol = safe_float(vol20.mean(), 0)
+    if avg_vol > 0 and last_vol > avg_vol * 8 and avg_turnover < MIN_AVG_TURNOVER * 1.5:
+        return False, "異常暴量但均量偏低"
     return True, "通過"
 
 
@@ -3188,22 +3349,43 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         fund_pct = clamp(fund["score"] / 70 * 100)
         val_pct = clamp(val["score"] / 50 * 100)
         chips_pct = clamp(chips / 30 * 100)
+        # V12.7：相對大盤強度（使用 regime 內已切好的大盤 df，不額外打 API）
+        mkt_ret20 = np.nan
+        try:
+            mkt_df = regime_dict.get("df") if isinstance(regime_dict, dict) else None
+            if mkt_df is not None and isinstance(mkt_df, pd.DataFrame) and not mkt_df.empty and "close" in mkt_df.columns:
+                mc = pd.to_numeric(mkt_df["close"], errors="coerce").dropna()
+                if len(mc) >= 21 and mc.iloc[-21] != 0:
+                    mkt_ret20 = float(mc.iloc[-1] / mc.iloc[-21] - 1)
+        except Exception:
+            mkt_ret20 = np.nan
+        rs_score, rs_excess = relative_strength_score(x.get("RET_20"), mkt_ret20)
+        breakout_ok, conf_reasons, conf_score = aggressive_breakout_confirmed(daily)
         market_mult = 1.00 if regime_dict["regime"] == "BULL" else 0.85 if regime_dict["regime"] == "NEUTRAL" else mp["bear_mult"] if regime_dict["regime"] == "BEAR" else 0.75
-        # 模式專屬權重（標準＝趨勢穩健；積極＝突破／籌碼動能）
+        # 模式專屬權重；相對強度以小權重併入（不取代原因子）
+        w_rs = 0.10 if mode == "平衡" else 0.08
+        scale = 1.0 - w_rs
         raw = (
-            fund_pct * mp["w_fund"]
-            + moat * mp["w_moat"]
-            + val_pct * mp["w_val"]
-            + chips_pct * mp["w_chips"]
-            + technical * mp["w_tech"]
-            + breakout * mp["w_breakout"]
+            fund_pct * mp["w_fund"] * scale
+            + moat * mp["w_moat"] * scale
+            + val_pct * mp["w_val"] * scale
+            + chips_pct * mp["w_chips"] * scale
+            + technical * mp["w_tech"] * scale
+            + breakout * mp["w_breakout"] * scale
+            + rs_score * w_rs
         )
         final = clamp(raw * market_mult)
         distance_20_high = price / safe_float(x["HIGH_20"]) - 1 if safe_float(x["HIGH_20"]) > 0 else np.nan
         overheat = safe_float(x["RET_20"]) > .25 or safe_float(x["RSI"]) > 78 or (not pd.isna(distance_20_high) and distance_20_high > .03)
         early_score = max(0, breakout - mp["overheat_penalty"]) if overheat else breakout
         if regime_dict["regime"] == "BEAR": early_score = max(0, early_score - 20)
+        # 積極模式：未確認突破則起漲分打折，降低假突破買進分
+        if mode == "積極" and not breakout_ok:
+            early_score = early_score * 0.55
         buy_score = clamp(final * mp["final_weight"] + early_score * mp["early_weight"])
+        # 相對弱勢再扣一點（避免只靠基本面高分）
+        if not pd.isna(rs_excess) and rs_excess <= -5:
+            buy_score = clamp(buy_score - (4 if mode == "平衡" else 2))
         status_label = momentum_status(x["RET_20"], x["RSI"], x["VOL_RATIO"], price, x["MA20"], x["MA60"], distance_20_high)
         risk = risk_level(x.get("ATR"), price, x["RSI"], breakout, regime_dict["regime"])
         prev_close = safe_float(daily.iloc[-2].get("close")) if len(daily) >= 2 else np.nan
@@ -3213,7 +3395,13 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         ref20_close = safe_float(daily.iloc[-21].get("close")) if len(daily) >= 21 else np.nan
         change_20d_pct = (price / ref20_close - 1) * 100 if not pd.isna(ref20_close) and ref20_close > 0 else np.nan
         limit_status = limit_up_status(price, prev_close, safe_float(x.get("max")), safe_float(x.get("min")), day_change_pct)
-        decision = decision_label(buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"), market_regime=regime_dict["regime"], mode=mode)
+        th_adj, th_note = calibration_threshold_adjust(mode)
+        decision = decision_label(
+            buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"),
+            market_regime=regime_dict["regime"], mode=mode,
+            breakout_ok=(breakout_ok if mode == "積極" else True),
+            rs_excess=rs_excess, threshold_adj=th_adj,
+        )
         priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
         quality_inputs = {
             "基本面": any(not pd.isna(safe_float(fund.get(k))) for k in ["roe","roa","gross_margin","op_margin","eps_growth","revenue_growth"]),
@@ -3224,7 +3412,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         quality = "🟢 完整" if sum(quality_inputs.values()) == 4 else ("🟡 部分缺資料" if sum(quality_inputs.values()) >= 2 else "🔴 資料不足")
         if mode == "積極":
             if decision == "🟢 可買":
-                explanation = "積極邏輯：突破／爆量／資金集中條件偏強，短線動能值得優先關注。"
+                explanation = "積極邏輯：突破已確認（量能＋收盤位置），短線動能值得優先關注。"
             elif decision == "🟡 過熱觀察":
                 explanation = "動能仍強但短線偏熱，積極模式仍可觀察，不宜盲目追價。"
             elif decision == "⚠️ 漲停勿追":
@@ -3232,26 +3420,41 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             elif decision == "🔴 不買":
                 explanation = "突破與資金動能尚未同步，積極名單暫不列入。"
             else:
-                explanation = "積極條件部分成立，等待量能或突破再確認。"
+                if not breakout_ok:
+                    explanation = "分數接近但突破尚未確認（量能或收盤位置不足），先觀察。"
+                else:
+                    explanation = "積極條件部分成立，等待量能或突破再確認。"
         else:
             if decision == "🟢 可買":
-                explanation = "標準邏輯：趨勢結構、量能與基本條件較完整，適合一般選股研究。"
+                explanation = "標準邏輯：趨勢結構、相對強度與基本條件較完整，適合一般選股研究。"
             elif decision == "🟡 過熱觀察":
                 explanation = "趨勢仍在，但短線偏熱；標準模式建議等回檔或確認。"
             elif decision == "⚠️ 漲停勿追":
                 explanation = "分數高不代表可以追價，價格已接近漲停區。"
             elif decision == "🔴 不買":
-                explanation = "趨勢或量能結構尚未完整，標準模式暫不列入。"
+                if not pd.isna(rs_excess) and rs_excess <= -6:
+                    explanation = "相對大盤偏弱，即使部分條件成立也不列入標準可買。"
+                else:
+                    explanation = "趨勢或量能結構尚未完整，標準模式暫不列入。"
             else:
                 explanation = "條件介於中間，等待更多趨勢確認。"
+        if th_adj and abs(th_adj) >= 1:
+            explanation = explanation + f"（校準門檻調整 {th_adj:+.0f}：{th_note}）"
         reasons = build_reasons(decision, breakout_reasons, chip_detail, fund, val, status_label)
+        if mode == "積極" and conf_reasons:
+            reasons = list(reasons)[:2] + [f"突破確認：{'、'.join(conf_reasons[:2])}"]
+        if not pd.isna(rs_excess):
+            reasons = list(reasons)[:2] + [f"相對大盤20日超額 {rs_excess:+.1f}%"]
         return {"股票代碼": stock_id, "現價": round(price,2), "買進分": round(buy_score,1), "優先級": priority,
                 "狀態": status_label, "風險": risk, "資料品質": quality, "市場環境": regime_dict.get("regime", "UNKNOWN"),
                 "近1日漲跌%": round(day_change_pct,2) if not pd.isna(day_change_pct) else np.nan, "近5日漲跌%": round(change_5d_pct,2) if not pd.isna(change_5d_pct) else np.nan, "近20日漲跌%": round(change_20d_pct,2) if not pd.isna(change_20d_pct) else np.nan,
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
-                "護城河": round(moat,1), "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
+                "護城河": round(moat,1), "相對強度": round(rs_score,1), "相對超額%": round(rs_excess,2) if not pd.isna(rs_excess) else np.nan,
+                "突破確認": "是" if breakout_ok else "否", "確認分": round(conf_score,1),
+                "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
                 "過熱": "是" if overheat else "否", "評級": decision, "起漲理由": "、".join(breakout_reasons[:5]), "策略模式": mode,
+                "校準門檻調整": th_adj, "校準說明": th_note,
                 "趨勢": [round(float(v), 2) for v in daily["close"].tail(20).pct_change().fillna(0).cumsum().add(1).tolist()],
                 "daily": daily, "fund": fund, "moat_detail": moat_detail,
                 "_pit_note": "財報可得日以財報日期+45天、營收以日期+15天作保守代理。"
@@ -4207,6 +4410,13 @@ with tab_help:
       <div class="help-section">
         <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">📋 更新日誌</div></div>
         <div class="help-body">
+          <b>V12.7 — 準度強化</b>
+          <ul>
+            <li>相對大盤 20 日強度：過濾「大盤弱、個股也弱」的假強勢。</li>
+            <li>積極模式突破確認：量能＋收盤位置＋高點／均線，未確認最高只到「觀察」。</li>
+            <li>AI 戰績動態門檻：高分區間前瞻勝率偏弱時自動提高買進門檻。</li>
+            <li>流動性門檻提高，減少薄量雜訊。</li>
+          </ul>
           <b>V12.6 — 標準／積極雙邏輯</b>
           <ul>
             <li>拿掉「保守」模式，只保留「標準」與「積極」。</li>
@@ -5663,4 +5873,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V12.6 · 新手優先 · 標準／積極雙邏輯 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V12.7 · 新手優先 · 標準／積極雙邏輯 · 相對強度／突破確認 · 台股標準配色：紅漲綠跌 · Point-in-Time · Unified Buy Score · 研究輔助非投資建議")
