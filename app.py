@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V13.3：產業波段雷達 + 路徑一致性（除息還原全路徑）+ 弱轉強/緩漲加速
+# 台股 Quant Compass V13.3.1：趨勢波段通道 + 產業雷達 + 路徑一致性 + 積極掃描單一主按鈕
 # ------------------------------------------------------------
 # 修正說明（繼承 V13.0 全部內容）：
 # 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
@@ -1751,6 +1751,57 @@ def detect_chase_risk(ret20, rsi, distance_20_high, day_change_pct=None, rs_exce
 
 
 
+def is_trend_wave_setup(daily):
+    """V13.3.1 趨勢波段通道（積極模式第二條進場路徑）。
+
+    目標：捕捉「均線多頭 + 溫和放量 + 尚未極端過熱」的慢牛／填息／主升初期，
+    與「爆量突破」並列，避免長榮／陽明／金融慢牛整段零可買。
+
+    設計約束（控制假訊號）：
+      - 必須均線多頭結構（收盤 > MA20 > MA60）
+      - ADX 至少有趨勢感（>=18）
+      - 20 日漲幅在 3%～22%：已啟動但未到硬過熱區
+      - RSI 45～72：有動能、未極端超買
+      - 量比 >= 0.85：不是完全無量陰跌
+      - 不要求爆量突破 HIGH_20（那是第一條路徑的工作）
+    回傳 (ok: bool, reasons: list[str])
+    """
+    if daily is None or getattr(daily, "empty", True) or len(daily) < 60:
+        return False, ["資料不足"]
+    try:
+        x = daily.iloc[-1]
+        c = safe_float(x.get("close"))
+        ma20 = safe_float(x.get("MA20"))
+        ma60 = safe_float(x.get("MA60"))
+        adx = safe_float(x.get("ADX"), 0)
+        rsi = safe_float(x.get("RSI"), 50)
+        vol_ratio = safe_float(x.get("VOL_RATIO"), 1.0)
+        ret20 = safe_float(x.get("RET_20"), 0)
+        reasons = []
+        if any(pd.isna(v) for v in [c, ma20, ma60]) or c <= 0:
+            return False, ["均線資料不足"]
+        if not (c > ma20 > ma60):
+            return False, ["未形成收盤>MA20>MA60"]
+        reasons.append("均線多頭")
+        if adx < 18:
+            return False, reasons + ["ADX偏弱"]
+        reasons.append(f"ADX {adx:.0f}")
+        if ret20 < 0.03:
+            return False, reasons + ["20日漲幅尚未啟動"]
+        if ret20 > 0.22:
+            return False, reasons + ["20日漲幅已偏大(趨勢通道上限)"]
+        reasons.append(f"20日+{ret20*100:.0f}%")
+        if rsi < 45 or rsi > 72:
+            return False, reasons + [f"RSI {rsi:.0f}不在趨勢健康區"]
+        reasons.append(f"RSI {rsi:.0f}")
+        if vol_ratio < 0.85:
+            return False, reasons + ["量能過弱"]
+        reasons.append(f"量比 {vol_ratio:.1f}x")
+        return True, reasons[:4]
+    except Exception:
+        return False, ["趨勢判定異常"]
+
+
 def is_weak_to_strong_reversal(daily, day_change_pct):
     """通用：探底／急殺後的強勢起漲（含隔日漲停、起漲後連續強勢日）。
     全市場適用。目的：讓「殺低後轉強」能產生隔日可執行訊號，而非整段被漲停規則抹掉。
@@ -1831,16 +1882,20 @@ def is_trend_acceleration(daily, day_change_pct):
 
 def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE,
                    breakout_ok=True, rs_excess=None, threshold_adj=0.0, chase_risk=False,
-                   weak_to_strong=False, trend_accel=False):
+                   weak_to_strong=False, trend_accel=False, trend_wave_ok=False):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
     V12.9（賺錢導向）：更嚴追高、標準要求相對強度、積極必須突破確認才給可買。
     V13.1.2：弱轉強後的漲停 → 可買（隔日開盤）。
     V13.1.3：緩漲加速漲停 → 可買（隔日開盤），與弱轉強並列、不互相取代。
+    V13.3.1：趨勢波段通道 — 均線多頭＋溫和漲幅＋健康 RSI，可在無爆量突破時給可買
+             （硬過熱仍擋；軟追高對趨勢通道放行，避免慢牛零訊號）。
     """
     mp = get_mode_params(mode)
     mode = normalize_mode(mode)
     buy_th = mp["eod_buy_threshold"] + safe_float(threshold_adj, 0)
     watch_th = mp["eod_watch_threshold"] + max(0, safe_float(threshold_adj, 0) * 0.5)
+    # 趨勢通道：門檻略低於爆量突破（仍需有一定分數）
+    trend_buy_th = max(watch_th + 8, buy_th - 8)
     # 漲停：預設勿追；弱轉強 或 緩漲加速 → 允許隔日可執行訊號（不追當日漲停價）
     early_limit_ok = bool(weak_to_strong or trend_accel)
     if limit_up and not early_limit_ok:
@@ -1851,12 +1906,15 @@ def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN
         return "🟢 可買"
     if overheat:
         return "🟡 過熱觀察"
-    # 嚴格追高：非起漲型態仍不給可買
-    if chase_risk:
+    # 嚴格追高：爆量路徑仍擋；趨勢波段通道在未硬過熱時可放行（見下方）
+    if chase_risk and not trend_wave_ok:
         return "🟡 過熱觀察"
     if market_regime == "BEAR" and score < buy_th - 3:
         return "🔴 不買"
-    # 積極：未確認突破 → 永遠不給「可買」（假突破是最大虧錢來源）
+    # 積極 — 趨勢波段通道（第二條路徑）：不要求 breakout_ok
+    if mode == "積極" and trend_wave_ok and score >= trend_buy_th:
+        return "🟢 可買"
+    # 積極：未確認突破且非趨勢通道 → 不給「可買」
     if mode == "積極" and not breakout_ok:
         if score >= watch_th:
             return "🟡 觀察"
@@ -4149,6 +4207,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         th_adj, th_note = calibration_threshold_adjust(mode)
         weak_to_strong = is_weak_to_strong_reversal(daily, day_change_pct)
         trend_accel = is_trend_acceleration(daily, day_change_pct) if not weak_to_strong else False
+        trend_wave_ok, trend_wave_reasons = is_trend_wave_setup(daily)
         early_limit_ok = bool(weak_to_strong or trend_accel)
         strong_day = limit_status.startswith("🔒") or safe_float(day_change_pct, 0) >= 8.0
         if early_limit_ok and strong_day and mode == "積極" and not breakout_ok:
@@ -4157,6 +4216,9 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             conf_reasons = list(conf_reasons or []) + [tag]
         if early_limit_ok and strong_day:
             buy_score = clamp(buy_score + (8 if mode == "積極" else 5))
+        # 趨勢波段：結構分小幅加分（不取代突破權重，只讓慢牛分數較易達門檻）
+        if mode == "積極" and trend_wave_ok:
+            buy_score = clamp(buy_score + 4)
         # 漲停鎖死，或（起漲型態 + 當日強勢≥8%）都走 limit 起漲決策
         limit_flag = limit_status.startswith("🔒") or (early_limit_ok and safe_float(day_change_pct, 0) >= 8.0)
         decision = decision_label(
@@ -4165,6 +4227,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             breakout_ok=(breakout_ok if mode == "積極" else True),
             rs_excess=rs_excess, threshold_adj=th_adj, chase_risk=chase_risk,
             weak_to_strong=weak_to_strong, trend_accel=trend_accel,
+            trend_wave_ok=(trend_wave_ok if mode == "積極" else False),
         )
         priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
         quality_inputs = {
@@ -4178,6 +4241,8 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             if decision == "🟢 可買":
                 if weak_to_strong and limit_status.startswith("🔒"):
                     explanation = "積極邏輯：弱轉強後漲停確認起漲；建議等隔日開盤再執行，勿追當日漲停價。"
+                elif trend_wave_ok and not breakout_ok:
+                    explanation = "積極邏輯：趨勢波段通道（均線多頭＋溫和漲幅＋健康RSI）；適合主升／填息慢牛，非爆量突破單。"
                 elif trend_accel and limit_status.startswith("🔒"):
                     explanation = "積極邏輯：緩漲後加速漲停；建議等隔日開盤再執行，勿追當日漲停價。"
                 else:
@@ -4229,7 +4294,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
                 "成交量": int(safe_float(x.get("volume"),0)), "量比": safe_float(x["VOL_RATIO"]), "漲停狀態": limit_status, "決策": decision, "說明": explanation, "理由": reasons,
                 "日期": as_of.strftime("%Y-%m-%d"), "綜合分": round(final,1), "起漲分": round(early_score,1), "基本面": round(fund_pct,1), "估值": round(val_pct,1), "籌碼": round(chips_pct,1), "技術": round(technical,1),
                 "護城河": round(moat,1), "相對強度": round(rs_score,1), "相對超額%": round(rs_excess,2) if not pd.isna(rs_excess) else np.nan,
-                "突破確認": "是" if breakout_ok else "否", "確認分": round(conf_score,1),
+                "突破確認": "是" if breakout_ok else "否", "確認分": round(conf_score,1), "趨勢波段": "是" if trend_wave_ok else "否",
                 "RSI": safe_float(x["RSI"]), "ADX": safe_float(x["ADX"]), "ATR": safe_float(x["ATR"]), "PEG": val["PEG"], "PER": val["PER"], "PBR": val["PBR"],
                 "過熱": "是" if overheat else ("追高" if chase_risk else "否"),
                 "追高風險": "是" if chase_risk else "否",
@@ -7184,4 +7249,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V13.3 · 產業波段雷達 · 路徑一致性 · 除息還原全路徑 · 參數凍結 · ATR部位建議 · 活體AI戰績 · 前瞻盲測優先 · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.3.1 · 趨勢波段通道 · 產業雷達 · 積極掃描 · 路徑一致性 · 研究輔助非投資建議")
