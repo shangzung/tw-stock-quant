@@ -2275,6 +2275,33 @@ def get_institutional(stock_id, days=120):
         return pd.DataFrame()
 
 @st.cache_data(ttl=EOD_CACHE_TTL, show_spinner=False)
+def _get_dividend_result_cached(stock_id, days):
+    """V13.2：除權除息結果表（TaiwanStockDividendResult），免費帳號可用。
+    只用來算『回溯還原股價』的調整係數，不影響任何實際成交價欄位。
+    沒有除權息事件（或抓不到）時回傳空表，呼叫端會自動當成『不需要調整』。
+    """
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    df = get_finmind_api().taiwan_stock_dividend_result(stock_id=stock_id, start_date=start)
+    throttle()
+    if df is None or df.empty:
+        raise ValueError("taiwan_stock_dividend_result 回傳空資料")
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ["before_price", "after_price"]:
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.sort_values("date").reset_index(drop=True)
+
+def get_dividend_result(stock_id, days=1800):
+    """個股除權息事件（用於還原股價）。抓不到（免費額度用完、該股從未除權息）
+    一律回傳空表，上層會自動 fallback 成『不調整』，不會讓整個分析失敗。
+    """
+    try:
+        return _get_dividend_result_cached(stock_id, days)
+    except Exception as e:
+        _log_api_error("taiwan_stock_dividend_result", stock_id, e)
+        return pd.DataFrame()
+
+@st.cache_data(ttl=EOD_CACHE_TTL, show_spinner=False)
 def _get_yahoo_benchmark_cached(ticker):
     mkt = yf.download(ticker, period="10y", progress=False, auto_adjust=False)
     if mkt.empty: raise ValueError(f"yfinance {ticker} 回傳空資料")
@@ -3304,33 +3331,94 @@ def get_market_snapshot():
 # =========================
 # 4. 技術指標
 # =========================
-def add_technical_indicators(df):
+def _dividend_adjustment_factor(dates, div_df):
+    """V13.2 新增：回溯還原股價係數（跟一般看盤軟體的『還原股價』算法相同）。
+
+    背景（2603 個案）：技術指標原本直接用 taiwan_stock_daily 的『原始成交價』算，
+    但長榮這類高股息公司除息當天股價會被交易所依配息金額往下砍一截（2026/06/17
+    除息、現金股利 16 元，以 6 月初 237 元左右的股價計算約 -6.7%）。這不是真的
+    下跌，只是參考價重設，但 MA20/HIGH_20/RET_20 這些『捲動視窗』指標如果直接吃
+    原始收盤價，會在除息後的 20 個交易日內，視窗裡還留著除息前『虛高』的價格，
+    導致：
+      - HIGH_20 長期停在除息前的高點 → 股價怎麼漲都『還沒過前高』
+      - RET_20（近20日報酬率）被那一天的假跌幅拖累，長期呈現偏低甚至負值
+      - 積極模式的『突破確認』（收盤需接近 HIGH_20 或站上 MA20）因此被卡住，
+        整個填息期間（本例約 42 個交易日）幾乎不可能觸發「🟢 可買」
+    2615（現金股利僅 3 元、11 天就填息）受影響小很多，5351 這次窗口內完全沒有
+    除權息，所以兩者都不會踩到這個問題——這就是「同樣飆股型態，2603 抓不到、
+    2615／5351 抓得到」的根本原因，不是積極模式的門檻邏輯本身有問題。
+
+    做法：只調整『指標計算用』的價格序列，除權息日之前的每一天都乘上
+    after_price/before_price（可疊加多次事件）；除權息當天與之後維持原始價格
+    不變。close/open/max/min 這幾個「原始成交價」欄位完全不受影響，回測進出場
+    金額、報酬率計算都還是用真實成交價，只有 MA/RSI/HIGH_20/RET_20 這類指標的
+    『輸入』改吃還原價，讓指標在除權息前後連續，不會出現人為的假缺口。
+
+    dates 需為已轉成 datetime、且與 df 同索引的 Series；div_df 必須是呼叫端已經
+    做過 point-in-time 篩選（只含「已經發生」的除權息事件）的除權除息結果表，
+    否則會有用到未來資訊的風險。
+    """
+    factor = pd.Series(1.0, index=dates.index)
+    if div_df is None or div_df.empty:
+        return factor
+    d = div_df.copy()
+    if "date" not in d.columns or "before_price" not in d.columns or "after_price" not in d.columns:
+        return factor
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d["before_price"] = pd.to_numeric(d["before_price"], errors="coerce")
+    d["after_price"] = pd.to_numeric(d["after_price"], errors="coerce")
+    d = d.dropna(subset=["date", "before_price", "after_price"])
+    d = d[(d["before_price"] > 0) & (d["after_price"] > 0)]
+    if d.empty:
+        return factor
+    for _, r in d.sort_values("date").iterrows():
+        ratio = float(r["after_price"]) / float(r["before_price"])
+        if pd.isna(ratio) or ratio <= 0:
+            continue
+        factor.loc[dates < r["date"]] *= ratio
+    return factor
+
+
+def add_technical_indicators(df, dividend_events=None):
+    """dividend_events：可選，該股「已發生」的除權除息結果（TaiwanStockDividendResult，
+    需含 date/before_price/after_price）。有帶入時，所有『捲動視窗』技術指標
+    （MA/RSI/K D/MACD/ADX/ATR/OBV/RET_5/RET_20/HIGH_20/HIGH_60/LOW_20）改用
+    還原股價計算；close/open/max/min 原始成交價欄位不變（詳見 _dividend_adjustment_factor）。
+    不帶 dividend_events 時行為與舊版完全相同（純原始價格），確保既有呼叫端不受影響。
+    """
     df = df.copy()
     if df.empty or "close" not in df.columns: return df
-    df["MA5"] = df["close"].rolling(5).mean()
-    df["MA20"] = df["close"].rolling(20).mean()
-    df["MA60"] = df["close"].rolling(60).mean()
-    df["MA120"] = df["close"].rolling(120).mean()
+    dates = pd.to_datetime(df["date"], errors="coerce") if "date" in df.columns else pd.Series(pd.NaT, index=df.index)
+    adj = _dividend_adjustment_factor(dates, dividend_events) if dividend_events is not None else pd.Series(1.0, index=df.index)
+    c = df["close"] * adj
+    o = df["open"] * adj if "open" in df.columns else c
+    h = df["max"] * adj if "max" in df.columns else c
+    l = df["min"] * adj if "min" in df.columns else c
+
+    df["MA5"] = c.rolling(5).mean()
+    df["MA20"] = c.rolling(20).mean()
+    df["MA60"] = c.rolling(60).mean()
+    df["MA120"] = c.rolling(120).mean()
 
     if "max" in df.columns and "min" in df.columns:
         try:
-            df["RSI"] = ta.momentum.RSIIndicator(close=df["close"], window=14).rsi()
-            stoch = ta.momentum.StochasticOscillator(high=df["max"], low=df["min"], close=df["close"], window=14, smooth_window=3)
+            df["RSI"] = ta.momentum.RSIIndicator(close=c, window=14).rsi()
+            stoch = ta.momentum.StochasticOscillator(high=h, low=l, close=c, window=14, smooth_window=3)
             df["K"], df["D"] = stoch.stoch(), stoch.stoch_signal()
-            macd = ta.trend.MACD(close=df["close"])
+            macd = ta.trend.MACD(close=c)
             df["MACD"], df["MACD_signal"] = macd.macd(), macd.macd_signal()
-            df["ADX"] = ta.trend.ADXIndicator(high=df["max"], low=df["min"], close=df["close"], window=14).adx()
-            df["ATR"] = ta.volatility.AverageTrueRange(high=df["max"], low=df["min"], close=df["close"], window=14).average_true_range()
-            df["OBV"] = ta.volume.OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"].fillna(0)).on_balance_volume()
+            df["ADX"] = ta.trend.ADXIndicator(high=h, low=l, close=c, window=14).adx()
+            df["ATR"] = ta.volatility.AverageTrueRange(high=h, low=l, close=c, window=14).average_true_range()
+            df["OBV"] = ta.volume.OnBalanceVolumeIndicator(close=c, volume=df["volume"].fillna(0)).on_balance_volume()
         except Exception: pass
 
     df["VOL_MA20"] = df["volume"].rolling(20).mean() if "volume" in df.columns else np.nan
     df["VOL_RATIO"] = df["volume"] / df["VOL_MA20"] if "volume" in df.columns else 1.0
-    df["RET_5"] = df["close"].pct_change(5)
-    df["RET_20"] = df["close"].pct_change(20)
-    df["HIGH_20"] = df["close"].rolling(20).max()
-    df["HIGH_60"] = df["close"].rolling(60).max()
-    df["LOW_20"] = df["close"].rolling(20).min()
+    df["RET_5"] = c.pct_change(5)
+    df["RET_20"] = c.pct_change(20)
+    df["HIGH_20"] = c.rolling(20).max()
+    df["HIGH_60"] = c.rolling(60).max()
+    df["LOW_20"] = c.rolling(20).min()
     return df
 
 # =========================
@@ -3701,6 +3789,7 @@ def prepare_pit_sources(stock_id, daily_days=1500):
         "financial": get_financial(stock_id, 2400),
         "per_pbr": get_per_pbr(stock_id, 1800),
         "institutional": get_institutional(stock_id, 600),
+        "dividend": get_dividend_result(stock_id, daily_days),  # V13.2：用於還原股價，見 _dividend_adjustment_factor
     }
 
 
@@ -3792,7 +3881,10 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         daily_full = sources["daily"]
         daily = point_in_time_filter(daily_full, as_of)
         if daily.empty or len(daily) < 120: return None
-        daily = add_technical_indicators(daily)
+        # V13.2：除權除息事件也要做 point-in-time 篩選（只留「已經發生」的），
+        # 才能安全地拿去算還原股價係數，不會用到 as_of 當下還不存在的未來資訊。
+        div_pit = point_in_time_filter(sources.get("dividend", pd.DataFrame()), as_of)
+        daily = add_technical_indicators(daily, dividend_events=div_pit)
         rev = point_in_time_filter(sources["revenue"], as_of, lag_days=15)
         fin = point_in_time_filter(sources["financial"], as_of, lag_days=45)
         pe = point_in_time_filter(sources["per_pbr"], as_of)
@@ -3995,6 +4087,7 @@ def prepare_pit_sources_batch(stock_ids, daily_days=1500):
         "financial": (datetime.now() - timedelta(days=2400)).strftime("%Y-%m-%d"),
         "per_pbr": (datetime.now() - timedelta(days=1800)).strftime("%Y-%m-%d"),
         "institutional": (datetime.now() - timedelta(days=600)).strftime("%Y-%m-%d"),
+        "dividend": (datetime.now() - timedelta(days=daily_days)).strftime("%Y-%m-%d"),
     }
     calls = [
         ("daily", lambda: client.taiwan_stock_daily(stock_id_list=ids, start_date=start_daily), ["close","open","max","min","Trading_turnover","Trading_Volume","Trading_money"]),
@@ -4002,6 +4095,9 @@ def prepare_pit_sources_batch(stock_ids, daily_days=1500):
         ("financial", lambda: client.taiwan_stock_financial_statement(stock_id_list=ids, start_date=starts["financial"]), ["value"]),
         ("per_pbr", lambda: client.taiwan_stock_per_pbr(stock_id_list=ids, start_date=starts["per_pbr"]), ["PER","PBR","dividend_yield"]),
         ("institutional", lambda: client.taiwan_stock_institutional_investors(stock_id_list=ids, start_date=starts["institutional"]), ["buy","sell"]),
+        # V13.2：除權除息結果，用於還原股價（見 _dividend_adjustment_factor）。
+        # 免費帳號可用；一次批次抓 shortlist 全部股票，只多 1 次 API 請求。
+        ("dividend", lambda: client.taiwan_stock_dividend_result(stock_id_list=ids, start_date=starts["dividend"]), ["before_price","after_price","stock_and_cache_dividend","max_price","min_price","open_price","reference_price"]),
     ]
     raw = {}
     for name, fn, numeric in calls:
