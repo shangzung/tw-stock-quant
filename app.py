@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V13.3.1：趨勢波段通道 + 產業雷達 + 路徑一致性 + 積極掃描單一主按鈕
+# 台股 Quant Compass V13.3.2：趨勢波段放寬（慢牛）+ 產業雷達 + 路徑一致性 + 積極掃描
 # ------------------------------------------------------------
 # 修正說明（繼承 V13.0 全部內容）：
 # 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
@@ -1752,18 +1752,17 @@ def detect_chase_risk(ret20, rsi, distance_20_high, day_change_pct=None, rs_exce
 
 
 def is_trend_wave_setup(daily):
-    """V13.3.1 趨勢波段通道（積極模式第二條進場路徑）。
+    """V13.3.2 趨勢波段通道（積極模式第二條進場路徑）。
 
-    目標：捕捉「均線多頭 + 溫和放量 + 尚未極端過熱」的慢牛／填息／主升初期，
-    與「爆量突破」並列，避免長榮／陽明／金融慢牛整段零可買。
+    目標：捕捉慢牛／填息／主升初期（長榮、陽明、金融），與爆量突破並列。
 
-    設計約束（控制假訊號）：
-      - 必須均線多頭結構（收盤 > MA20 > MA60）
-      - ADX 至少有趨勢感（>=18）
-      - 20 日漲幅在 3%～22%：已啟動但未到硬過熱區
-      - RSI 45～72：有動能、未極端超買
-      - 量比 >= 0.85：不是完全無量陰跌
-      - 不要求爆量突破 HIGH_20（那是第一條路徑的工作）
+    V13.3.2 放寬（針對 2609 驗證：舊條件 RET≥3%＋量比≥0.85 導致整段僅 0～3 天達標）：
+      - 收盤 > MA20 > MA60（維持，核心結構）
+      - 近 5 日至少 3 日收在 MA20 上（避免一日假多頭）
+      - ADX >= 14（有趨勢感即可）
+      - 20 日漲幅 -2%～20%（允許短暫消化，上限低於硬過熱）
+      - RSI 40～75
+      - 量比 >= 0.65，或 20 日均量仍在合理水位
     回傳 (ok: bool, reasons: list[str])
     """
     if daily is None or getattr(daily, "empty", True) or len(daily) < 60:
@@ -1780,21 +1779,34 @@ def is_trend_wave_setup(daily):
         reasons = []
         if any(pd.isna(v) for v in [c, ma20, ma60]) or c <= 0:
             return False, ["均線資料不足"]
-        if not (c > ma20 > ma60):
+        if not (c > ma20 and ma20 > ma60):
             return False, ["未形成收盤>MA20>MA60"]
         reasons.append("均線多頭")
-        if adx < 18:
+        # 近 5 日站上 MA20 的穩定性
+        try:
+            tail = daily.iloc[-5:]
+            above = 0
+            for _, r in tail.iterrows():
+                rc, rm = safe_float(r.get("close")), safe_float(r.get("MA20"))
+                if not pd.isna(rc) and not pd.isna(rm) and rc >= rm:
+                    above += 1
+            if above < 3:
+                return False, reasons + [f"近5日僅{above}日站上MA20"]
+            reasons.append(f"近5日{above}日站MA20")
+        except Exception:
+            pass
+        if adx < 14:
             return False, reasons + ["ADX偏弱"]
         reasons.append(f"ADX {adx:.0f}")
-        if ret20 < 0.03:
-            return False, reasons + ["20日漲幅尚未啟動"]
-        if ret20 > 0.22:
+        if ret20 < -0.02:
+            return False, reasons + ["20日仍偏弱"]
+        if ret20 > 0.20:
             return False, reasons + ["20日漲幅已偏大(趨勢通道上限)"]
-        reasons.append(f"20日+{ret20*100:.0f}%")
-        if rsi < 45 or rsi > 72:
+        reasons.append(f"20日{ret20*100:+.0f}%")
+        if rsi < 40 or rsi > 75:
             return False, reasons + [f"RSI {rsi:.0f}不在趨勢健康區"]
         reasons.append(f"RSI {rsi:.0f}")
-        if vol_ratio < 0.85:
+        if vol_ratio < 0.65:
             return False, reasons + ["量能過弱"]
         reasons.append(f"量比 {vol_ratio:.1f}x")
         return True, reasons[:4]
@@ -1895,7 +1907,7 @@ def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN
     buy_th = mp["eod_buy_threshold"] + safe_float(threshold_adj, 0)
     watch_th = mp["eod_watch_threshold"] + max(0, safe_float(threshold_adj, 0) * 0.5)
     # 趨勢通道：門檻略低於爆量突破（仍需有一定分數）
-    trend_buy_th = max(watch_th + 8, buy_th - 8)
+    trend_buy_th = max(watch_th + 5, buy_th - 12)  # V13.3.2：趨勢通道門檻再降，利於慢牛達標
     # 漲停：預設勿追；弱轉強 或 緩漲加速 → 允許隔日可執行訊號（不追當日漲停價）
     early_limit_ok = bool(weak_to_strong or trend_accel)
     if limit_up and not early_limit_ok:
@@ -4218,7 +4230,7 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
             buy_score = clamp(buy_score + (8 if mode == "積極" else 5))
         # 趨勢波段：結構分小幅加分（不取代突破權重，只讓慢牛分數較易達門檻）
         if mode == "積極" and trend_wave_ok:
-            buy_score = clamp(buy_score + 4)
+            buy_score = clamp(buy_score + 6)  # V13.3.2
         # 漲停鎖死，或（起漲型態 + 當日強勢≥8%）都走 limit 起漲決策
         limit_flag = limit_status.startswith("🔒") or (early_limit_ok and safe_float(day_change_pct, 0) >= 8.0)
         decision = decision_label(
@@ -7037,8 +7049,10 @@ with tab_advanced:
                                     "收盤": _snap.get("現價"),
                                     "買進分": _snap.get("買進分"),
                                     "決策": _snap.get("決策"),
+                                    "突破確認": _snap.get("突破確認"),
+                                    "趨勢波段": _snap.get("趨勢波段"),
                                     "漲停": _snap.get("漲停狀態"),
-                                    "說明": str(_snap.get("說明", ""))[:40],
+                                    "說明": str(_snap.get("說明", ""))[:80],
                                 })
                             if _rows:
                                 _dd = pd.DataFrame(_rows)
@@ -7249,4 +7263,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V13.3.1 · 趨勢波段通道 · 產業雷達 · 積極掃描 · 路徑一致性 · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.3.2 · 趨勢波段放寬 · 產業雷達 · 積極掃描 · 路徑一致性 · 研究輔助非投資建議")
