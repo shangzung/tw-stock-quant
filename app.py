@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V13.1：驗證紀律 + 實盤可用性加強版
+# 台股 Quant Compass V13.1.1：驗證紀律 + 實盤可用性加強版 + HTML 渲染修正
 # ------------------------------------------------------------
 # 修正說明（繼承 V13.0 全部內容）：
 # 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
@@ -17,6 +17,7 @@
 import time
 import math
 import html
+import textwrap
 import json
 import threading
 import uuid
@@ -78,6 +79,9 @@ def now_tw():
     return datetime.now(TW_TZ)
 
 
+def md_html(content: str):
+    """安全輸出 HTML：先 dedent，避免 Streamlit Markdown 把縮排區塊當 code block 顯示 raw 標籤。"""
+    st.markdown(textwrap.dedent(str(content)).lstrip("\n"), unsafe_allow_html=True)
 
 
 # =========================
@@ -539,7 +543,7 @@ if "intraday_scan_out" not in st.session_state: st.session_state["intraday_scan_
 if "intraday_scan_saved_at" not in st.session_state: st.session_state["intraday_scan_saved_at"] = None
 
 # Mac 風格與手機端最佳化 CSS
-st.markdown("""
+md_html("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
@@ -1092,7 +1096,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
+md_html("""
 <div class="terminal-header">
   <div class="brand-block">
     <div class="brand-mark">✦</div>
@@ -1105,7 +1109,7 @@ st.markdown("""
     <span class="status-dot"></span> 台股市場研究模式 · Point-in-Time / Unified Buy Score
   </div>
 </div>
-""", unsafe_allow_html=True)
+""")
 
 # =========================
 # 1. API 與 Token 鎖定按鈕
@@ -3465,7 +3469,7 @@ def market_prefilter(stock_id):
     # 修正：將抓取天數從 260 改為 600，與 calculate_stock 的參數完全一致，
     # 以確保快取能正確命中，避免重複消耗 API 請求額度。
     daily = get_daily(stock_id, 600)
-    
+
     ok, _ = passes_liquidity_gate(daily)
     if not ok:
         return None
@@ -4746,7 +4750,7 @@ def _dash_index_card(label, key):
     return f'<div class="overview-card"><div class="overview-label">{label}</div><div class="overview-value">—</div><div class="overview-sub">目前無法取得</div></div>'
 
 
-st.markdown(f"""
+md_html(f"""
 <div class="market-overview">
   <div class="overview-card"><div class="overview-label">大盤位階</div><div class="overview-value">{regime.get('score',50):.0f}<span style="font-size:12px;color:var(--text-sub)"> / 100</span></div><div class="overview-sub {'tw-up' if regime.get('score',50)>=60 else 'tw-down'}">{regime.get('regime','UNKNOWN')} · {regime.get('message','')}</div></div>
   <div class="overview-card"><div class="overview-label">台股即時樣本</div><div class="overview-value">{len(_dash_live):,}</div><div class="overview-sub"><span class="tw-up">上漲 {_dash_up:,}</span> · <span class="tw-down">下跌 {_dash_down:,}</span></div></div>
@@ -4759,7 +4763,7 @@ st.markdown(f"""
   <div class="scanner-launch live"><div class="scanner-launch-title">⚡ 今日機會</div><div class="scanner-launch-sub">先看 3 張卡片的「建議＋風險＋現價」。即時行情套用昨晚研究結果，原則上 0 FinMind。</div><span class="launch-badge">約 15 秒行情快取</span></div>
   <div class="scanner-launch eod"><div class="scanner-launch-title">🌙 深度掃描</div><div class="scanner-launch-sub">完整研究 → 基本面 × 估值 × 籌碼 × 技術 → 建立「明天最值得看」名單。</div><span class="launch-badge">FinMind 深度研究</span></div>
 </div>
-""", unsafe_allow_html=True)
+""")
 
 tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_advanced, tab_help, tab_settings = st.tabs([
     "⚡ 今日機會", "🌙 深度掃描", "🔍 查股票", "🩺 我的庫存", "🏆 AI戰績", "🔬 進階研究", "📖 使用說明", "⚙️ 系統設定"
@@ -4769,160 +4773,160 @@ tab_intraday, tab_eod, tab_stock, tab_holdings, tab_verify, tab_advanced, tab_he
 if "onboarding_done" not in st.session_state:
     st.session_state["onboarding_done"] = False
 if not st.session_state.get("onboarding_done"):
-    st.markdown("""
-    <div class="help-section help-highlight" style="margin:8px 0 14px 0;">
-      <div class="help-section-head"><div class="help-num">👋</div><div class="help-section-title">第一次使用？先記住這 3 步</div></div>
-      <div class="help-body">
-        <ol>
-          <li><b>晚上</b>：到「🌙 深度掃描」按一次掃描，產生明天觀察名單。</li>
-          <li><b>白天</b>：到「⚡ 今日機會」掃描，只看最上面 3 張卡片的「建議、風險、現價」。</li>
-          <li><b>記住</b>：🔥 搶先關注 ≠ 可以買；不確定就先觀察。詳細說明在「📖 使用說明」。</li>
-        </ol>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    md_html("""
+<div class="help-section help-highlight" style="margin:8px 0 14px 0;">
+  <div class="help-section-head"><div class="help-num">👋</div><div class="help-section-title">第一次使用？先記住這 3 步</div></div>
+  <div class="help-body">
+    <ol>
+      <li><b>晚上</b>：到「🌙 深度掃描」按一次掃描，產生明天觀察名單。</li>
+      <li><b>白天</b>：到「⚡ 今日機會」掃描，只看最上面 3 張卡片的「建議、風險、現價」。</li>
+      <li><b>記住</b>：🔥 搶先關注 ≠ 可以買；不確定就先觀察。詳細說明在「📖 使用說明」。</li>
+    </ol>
+  </div>
+</div>
+""")
     if st.button("✓ 我知道了，開始使用", type="primary", key="onboarding_ok"):
         st.session_state["onboarding_done"] = True
         st.rerun()
 
 # --- TAB：使用說明（單頁手冊：只有一個說明，手機上下滑就能看完，不用一路點展開） ---
 with tab_help:
-    st.subheader("📖 Quant Compass V12.5 使用說明")
+    st.subheader("📖 Quant Compass V13.1 使用說明")
     st.caption("給第一次使用的人：不用懂量化。先會「每天按哪兩個按鈕、卡片上三個字怎麼看」就夠了。")
 
-    st.markdown("""
-    <div class="terminal-grid">
-      <div class="terminal-card"><div class="tc-label">你可以把它想成</div><div class="tc-value">台股觀察助手</div><div class="tc-sub">每天幫你從市場找出值得研究的股票，不替你下單。</div></div>
-      <div class="terminal-card"><div class="tc-label">新手先看</div><div class="tc-value">建議燈號</div><div class="tc-sub">先看「建議怎麼做」，分數點開再看。</div></div>
-      <div class="terminal-card"><div class="tc-label">核心分數</div><div class="tc-value">買進分</div><div class="tc-sub">越高＝條件越完整；不是勝率、不是保證獲利。</div></div>
-      <div class="terminal-card"><div class="tc-label">記住一句</div><div class="tc-value">🔥 ≠ 可買</div><div class="tc-sub">「搶先關注」只代表昨天反應強，還不是正式買點。</div></div>
+    md_html("""
+<div class="terminal-grid">
+  <div class="terminal-card"><div class="tc-label">你可以把它想成</div><div class="tc-value">台股觀察助手</div><div class="tc-sub">每天幫你從市場找出值得研究的股票，不替你下單。</div></div>
+  <div class="terminal-card"><div class="tc-label">新手先看</div><div class="tc-value">建議燈號</div><div class="tc-sub">先看「建議怎麼做」，分數點開再看。</div></div>
+  <div class="terminal-card"><div class="tc-label">核心分數</div><div class="tc-value">買進分</div><div class="tc-sub">越高＝條件越完整；不是勝率、不是保證獲利。</div></div>
+  <div class="terminal-card"><div class="tc-label">記住一句</div><div class="tc-value">🔥 ≠ 可買</div><div class="tc-sub">「搶先關注」只代表昨天反應強，還不是正式買點。</div></div>
+</div>
+
+<div class="help-doc">
+
+  <div class="help-section help-highlight">
+    <div class="help-section-head"><div class="help-num">0</div><div class="help-section-title">第一次用：只要做這兩步</div></div>
+    <div class="help-body">
+      <ol>
+        <li><b>晚上或收盤後</b>：打開「🌙 深度掃描」→ 按「執行盤後深度掃描」→ 看「明日最值得看」。</li>
+        <li><b>隔天開盤後</b>：打開「⚡ 今日機會」→ 按「掃描今日盤中機會」→ <b>只看最上面 3 張卡片</b>（建議、風險、現價）。</li>
+      </ol>
+      不確定就先觀察，不要因為分數高就立刻買。進階研究整頁都可以先不看。
     </div>
+  </div>
 
-    <div class="help-doc">
-
-      <div class="help-section help-highlight">
-        <div class="help-section-head"><div class="help-num">0</div><div class="help-section-title">第一次用：只要做這兩步</div></div>
-        <div class="help-body">
-          <ol>
-            <li><b>晚上或收盤後</b>：打開「🌙 深度掃描」→ 按「執行盤後深度掃描」→ 看「明日最值得看」。</li>
-            <li><b>隔天開盤後</b>：打開「⚡ 今日機會」→ 按「掃描今日盤中機會」→ <b>只看最上面 3 張卡片</b>（建議、風險、現價）。</li>
-          </ol>
-          不確定就先觀察，不要因為分數高就立刻買。進階研究整頁都可以先不看。
-        </div>
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">1</div><div class="help-section-title">卡片上只要看三件事</div></div>
+    <div class="help-body">
+      <div class="help-quicklist">
+        <span class="help-chip">① 建議（怎麼處理）</span>
+        <span class="help-chip">② 風險（綠／黃／紅）</span>
+        <span class="help-chip">③ 現價與今日漲跌</span>
       </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">1</div><div class="help-section-title">卡片上只要看三件事</div></div>
-        <div class="help-body">
-          <div class="help-quicklist">
-            <span class="help-chip">① 建議（怎麼處理）</span>
-            <span class="help-chip">② 風險（綠／黃／紅）</span>
-            <span class="help-chip">③ 現價與今日漲跌</span>
-          </div>
-          <br/>
-          點開「查看分析」才會看到分數與細節。日常決策不需要一次看完所有數字。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">2</div><div class="help-section-title">建議燈號是什麼意思？</div></div>
-        <div class="help-body">
-          <ul>
-            <li><b>🟢 可買</b>：正式條件較完整，可列入觀察；仍請自己確認風險。</li>
-            <li><b>🔥 搶先關注</b>：昨天跳空／爆量／收在高點反應很強，但<b>還沒過正式買進門檻</b>——先記下來、先觀察，不要當「可以買」。</li>
-            <li><b>🟡 等待買點</b>：接近門檻，繼續看，不要急著追。</li>
-            <li><b>🟠 觀察</b>：可以留意，還沒到進場時機。</li>
-            <li><b>🔴 先跳過</b>：目前條件不足，把時間留給前面幾檔。</li>
-          </ul>
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">標準 vs 積極：兩套選股邏輯</div></div>
-        <div class="help-body">
-          不是只改「分數門檻高低」，而是兩套不同的篩選方式（也不會自動下單）。
-          <ul>
-            <li><b>⚖ 標準（趨勢穩健）</b>：技術分析為主——趨勢穩定、量能正常、型態較完整，偏向一般投資人常用選股；基本面／估值仍佔一定比重。</li>
-            <li><b>🚀 積極（飆股潛力）</b>：著重強勢突破、爆量、資金集中，尋找短線具爆發力的個股；訊號較多，也較容易誤觸，需要自己多篩。</li>
-          </ul>
-          兩種模式的掃描結果會分開保存，切換即可查看，不必重跑。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">4</div><div class="help-section-title">每天晚上：深度掃描</div></div>
-        <div class="help-body">
-          到「🌙 深度掃描」按「執行盤後深度掃描」。
-          系統會從全市場篩出流動性夠的股票，再做基本面／估值／籌碼／技術研究，排出「明天最值得看」的名單。
-          <b>簡單說：晚上回答「明天有哪些股票值得我看？」</b>
-          （「盤後」指的是用最近一個已收盤日的完整資料，不是限制你只能收盤後才能按。）
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">5</div><div class="help-section-title">隔天盤中：今日機會</div></div>
-        <div class="help-body">
-          到「⚡ 今日機會」按「掃描今日盤中機會」。
-          目的不是重做一遍財報研究，而是回答：<b>「昨晚看好的，今天市場有沒有在動？」</b>
-          原則上不消耗 FinMind 額度。只有交易時段（09:00–13:30，週一至週五）報價才會持續變化；非交易時段重複掃描結果相同是正常的。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">6</div><div class="help-section-title">買進分是什麼？（進階再看）</div></div>
-        <div class="help-body">
-          把基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境整理成 0–100 的排序分數。
-          <b>90 分不是 90% 勝率</b>。買進分回答「條件強不強」；風險回答「看錯代價多大」。
-          實際仍要自己決定是否下單。本系統是研究與決策輔助，不是自動下單機器人。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">7</div><div class="help-section-title">台股顏色與其他分頁</div></div>
-        <div class="help-body">
-          <b>價格：</b>紅漲、綠跌。<b>風險：</b>綠低／黃中／紅高（和漲跌顏色意義不同）。<br/>
-          <b>🔍 查股票</b>：單檔細看。<b>🩺 我的庫存</b>：持倉停損停利參考。<b>🏆 AI戰績</b>：歷史訊號表現。<b>🔬 進階研究</b>：回測工具，新手可整頁略過。<b>⚙️ 系統設定</b>：Token 與診斷。
-        </div>
-      </div>
-
-      <div class="help-section">
-        <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">📋 更新日誌</div></div>
-        <div class="help-body">
-          <b>V12.8 — 追高防護</b>
-          <ul>
-            <li>20日漲幅偏大／當日大漲收高／相對超額過高 → 不給「可買」，改「過熱觀察」。</li>
-            <li>進場價改建議「回檔價」（MA5／近低），避免用昨收直接追。</li>
-            <li>狀態「短線過熱」門檻下修，較早警示。</li>
-          </ul>
-          <b>V12.7 — 準度強化</b>
-          <ul>
-            <li>相對大盤 20 日強度：過濾「大盤弱、個股也弱」的假強勢。</li>
-            <li>積極模式突破確認：量能＋收盤位置＋高點／均線，未確認最高只到「觀察」。</li>
-            <li>AI 戰績動態門檻：高分區間前瞻勝率偏弱時自動提高買進門檻。</li>
-            <li>流動性門檻提高，減少薄量雜訊。</li>
-          </ul>
-          <b>V12.6 — 標準／積極雙邏輯</b>
-          <ul>
-            <li>拿掉「保守」模式，只保留「標準」與「積極」。</li>
-            <li>兩者不再只差門檻：標準偏趨勢穩健技術分析；積極偏突破／爆量／資金集中。</li>
-            <li>因子權重、技術計分、起漲比重皆依模式分開。</li>
-          </ul>
-          <b>V12.5（2026-08-22）— 新手優先</b>
-          <ul>
-            <li>今日機會 Top3：改為「建議＋風險＋一句話」，分數收到點開才看。</li>
-            <li>明確標示：🔥 搶先關注 ≠ 可以買。</li>
-            <li>分頁改名：今日機會、深度掃描、查股票、我的庫存、進階研究。</li>
-            <li>起漲雷達與完整資料預設收合；進階研究標示新手可略過。</li>
-            <li>使用說明改為 1 分鐘上手版，並加入本更新日誌。</li>
-          </ul>
-          <b>V12.x</b>：MIS 真即時報價、curl_cffi、背景自動更新、盤後／盤中資料分層、PIT 回測與 AI 戰績等。
-          <br/><br/>
-          <b>V10–V11</b>：統一買進分、雙掃描器、模式分存快取、反應強訊號命名調整等。
-        </div>
-      </div>
-
+      <br/>
+      點開「查看分析」才會看到分數與細節。日常決策不需要一次看完所有數字。
     </div>
-    """, unsafe_allow_html=True)
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">2</div><div class="help-section-title">建議燈號是什麼意思？</div></div>
+    <div class="help-body">
+      <ul>
+        <li><b>🟢 可買</b>：正式條件較完整，可列入觀察；仍請自己確認風險。</li>
+        <li><b>🔥 搶先關注</b>：昨天跳空／爆量／收在高點反應很強，但<b>還沒過正式買進門檻</b>——先記下來、先觀察，不要當「可以買」。</li>
+        <li><b>🟡 等待買點</b>：接近門檻，繼續看，不要急著追。</li>
+        <li><b>🟠 觀察</b>：可以留意，還沒到進場時機。</li>
+        <li><b>🔴 先跳過</b>：目前條件不足，把時間留給前面幾檔。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">3</div><div class="help-section-title">標準 vs 積極：兩套選股邏輯</div></div>
+    <div class="help-body">
+      不是只改「分數門檻高低」，而是兩套不同的篩選方式（也不會自動下單）。
+      <ul>
+        <li><b>⚖ 標準（趨勢穩健）</b>：技術分析為主——趨勢穩定、量能正常、型態較完整，偏向一般投資人常用選股；基本面／估值仍佔一定比重。</li>
+        <li><b>🚀 積極（飆股潛力）</b>：著重強勢突破、爆量、資金集中，尋找短線具爆發力的個股；訊號較多，也較容易誤觸，需要自己多篩。</li>
+      </ul>
+      兩種模式的掃描結果會分開保存，切換即可查看，不必重跑。
+    </div>
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">4</div><div class="help-section-title">每天晚上：深度掃描</div></div>
+    <div class="help-body">
+      到「🌙 深度掃描」按「執行盤後深度掃描」。
+      系統會從全市場篩出流動性夠的股票，再做基本面／估值／籌碼／技術研究，排出「明天最值得看」的名單。
+      <b>簡單說：晚上回答「明天有哪些股票值得我看？」</b>
+      （「盤後」指的是用最近一個已收盤日的完整資料，不是限制你只能收盤後才能按。）
+    </div>
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">5</div><div class="help-section-title">隔天盤中：今日機會</div></div>
+    <div class="help-body">
+      到「⚡ 今日機會」按「掃描今日盤中機會」。
+      目的不是重做一遍財報研究，而是回答：<b>「昨晚看好的，今天市場有沒有在動？」</b>
+      原則上不消耗 FinMind 額度。只有交易時段（09:00–13:30，週一至週五）報價才會持續變化；非交易時段重複掃描結果相同是正常的。
+    </div>
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">6</div><div class="help-section-title">買進分是什麼？（進階再看）</div></div>
+    <div class="help-body">
+      把基本面 × 估值 × 籌碼 × 技術 × 突破 × 市場環境整理成 0–100 的排序分數。
+      <b>90 分不是 90% 勝率</b>。買進分回答「條件強不強」；風險回答「看錯代價多大」。
+      實際仍要自己決定是否下單。本系統是研究與決策輔助，不是自動下單機器人。
+    </div>
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">7</div><div class="help-section-title">台股顏色與其他分頁</div></div>
+    <div class="help-body">
+      <b>價格：</b>紅漲、綠跌。<b>風險：</b>綠低／黃中／紅高（和漲跌顏色意義不同）。<br/>
+      <b>🔍 查股票</b>：單檔細看。<b>🩺 我的庫存</b>：持倉停損停利參考。<b>🏆 AI戰績</b>：歷史訊號表現。<b>🔬 進階研究</b>：回測工具，新手可整頁略過。<b>⚙️ 系統設定</b>：Token 與診斷。
+    </div>
+  </div>
+
+  <div class="help-section">
+    <div class="help-section-head"><div class="help-num">8</div><div class="help-section-title">📋 更新日誌</div></div>
+    <div class="help-body">
+      <b>V12.8 — 追高防護</b>
+      <ul>
+        <li>20日漲幅偏大／當日大漲收高／相對超額過高 → 不給「可買」，改「過熱觀察」。</li>
+        <li>進場價改建議「回檔價」（MA5／近低），避免用昨收直接追。</li>
+        <li>狀態「短線過熱」門檻下修，較早警示。</li>
+      </ul>
+      <b>V12.7 — 準度強化</b>
+      <ul>
+        <li>相對大盤 20 日強度：過濾「大盤弱、個股也弱」的假強勢。</li>
+        <li>積極模式突破確認：量能＋收盤位置＋高點／均線，未確認最高只到「觀察」。</li>
+        <li>AI 戰績動態門檻：高分區間前瞻勝率偏弱時自動提高買進門檻。</li>
+        <li>流動性門檻提高，減少薄量雜訊。</li>
+      </ul>
+      <b>V12.6 — 標準／積極雙邏輯</b>
+      <ul>
+        <li>拿掉「保守」模式，只保留「標準」與「積極」。</li>
+        <li>兩者不再只差門檻：標準偏趨勢穩健技術分析；積極偏突破／爆量／資金集中。</li>
+        <li>因子權重、技術計分、起漲比重皆依模式分開。</li>
+      </ul>
+      <b>V12.5（2026-08-22）— 新手優先</b>
+      <ul>
+        <li>今日機會 Top3：改為「建議＋風險＋一句話」，分數收到點開才看。</li>
+        <li>明確標示：🔥 搶先關注 ≠ 可以買。</li>
+        <li>分頁改名：今日機會、深度掃描、查股票、我的庫存、進階研究。</li>
+        <li>起漲雷達與完整資料預設收合；進階研究標示新手可略過。</li>
+        <li>使用說明改為 1 分鐘上手版，並加入本更新日誌。</li>
+      </ul>
+      <b>V12.x</b>：MIS 真即時報價、curl_cffi、背景自動更新、盤後／盤中資料分層、PIT 回測與 AI 戰績等。
+      <br/><br/>
+      <b>V10–V11</b>：統一買進分、雙掃描器、模式分存快取、反應強訊號命名調整等。
+    </div>
+  </div>
+
+</div>
+""")
 
 # --- TAB：系統設定（程式碼故意寫在最前面執行，讓改設定當下就對其他分頁生效，
 #     即使它在畫面上排在最後一個分頁也一樣）---
@@ -5008,13 +5012,41 @@ def render_pick_card(row, rank=None):
     name = "" if (_name_raw is None or (isinstance(_name_raw, float) and pd.isna(_name_raw))) else str(_name_raw)
     _decision_raw = row.get("決策")
     _decision_str = "" if (_decision_raw is None or (isinstance(_decision_raw, float) and pd.isna(_decision_raw))) else str(_decision_raw)
-    reasons_list = row.get("理由", []) or []
-    if not isinstance(reasons_list, (list, tuple)):
+
+    # 理由可能是 list / tuple / ndarray / 以頓號串起來的字串（舊快取）
+    reasons_raw = row.get("理由", [])
+    if reasons_raw is None or (isinstance(reasons_raw, float) and pd.isna(reasons_raw)):
         reasons_list = []
-    reasons_html = "".join(
-        f"<div>{'✓' if '🟢' in _decision_str else '✕' if '🔴' in _decision_str else '•'} {html.escape(str(r))}</div>"
-        for r in reasons_list[:3]
-    )
+    elif isinstance(reasons_raw, (list, tuple)):
+        reasons_list = list(reasons_raw)
+    elif isinstance(reasons_raw, np.ndarray):
+        reasons_list = reasons_raw.tolist()
+    elif isinstance(reasons_raw, str):
+        reasons_list = [x.strip() for x in reasons_raw.replace("；", "、").split("、") if x.strip()]
+    else:
+        try:
+            reasons_list = list(reasons_raw)
+        except Exception:
+            reasons_list = [str(reasons_raw)]
+
+    # 依決策選標記；理由本身已含 ⚠️ 時不再重複加符號
+    if "🟢" in _decision_str:
+        _mark = "✓"
+    elif "🔴" in _decision_str or "不買" in _decision_str:
+        _mark = "✕"
+    else:
+        _mark = "•"
+    reasons_bits = []
+    for r in reasons_list[:3]:
+        t = str(r).strip()
+        if not t:
+            continue
+        if t.startswith(("✓", "✕", "•", "⚠", "⚠️")):
+            reasons_bits.append(f"<div>{html.escape(t)}</div>")
+        else:
+            reasons_bits.append(f"<div>{_mark} {html.escape(t)}</div>")
+    reasons_html = "".join(reasons_bits)
+
     advice = html.escape(_eod_plain_advice(row))
     buy = safe_float(row.get("買進分"), 0)
     risk = html.escape(str(row.get("風險", "—")))
@@ -5047,33 +5079,36 @@ def render_pick_card(row, rank=None):
                 f'<div class="pick-sub" style="margin-top:6px;color:var(--accent-blue);">'
                 f'📐 參考部位（假設資金100萬、單筆風險1%）：'
                 f'<b>{_pos["lots"]} 張</b>（約 {_pos["notional"]:,.0f} 元，佔比 {_pos["position_pct"]:.1f}%）'
-                f'　·　{_pos["note"]}</div>'
+                f'　·　{html.escape(str(_pos.get("note", "")))}</div>'
             )
         else:
             pos_html = (
                 f'<div class="pick-sub" style="margin-top:6px;color:var(--text-sub);">'
-                f'📐 風險預算下不足 1 張（{_pos.get("note","")}），建議觀望或提高資金／風險單位。</div>'
+                f'📐 風險預算下不足 1 張（{html.escape(str(_pos.get("note", "")))}），建議觀望或提高資金／風險單位。</div>'
             )
 
-    st.markdown(f"""
-    <div class="pick-card">
-        <div class="pick-top">
-            <span class="pick-name">{prefix}{code} {name_e}</span>
-            <span class="pick-score">{buy:.0f}</span>
-        </div>
-        <div class="pick-sub" style="margin-top:8px;color:var(--text-main);font-size:13.5px;line-height:1.5;"><b>建議：</b>{advice}</div>
-        <div class="pick-sub">{decision} ・ {status} ・ 風險 {risk} ・ 資料 {quality} ・ 現價 {price}
-            ・ 今日 <span class="{c1}">{r1}</span>
-            ・ 5日 <span class="{c5}">{r5}</span>
-            ・ 20日 <span class="{c20}">{r20}</span></div>
-        <div class="pick-sub">風險調整優先級：<b>{pri:.0f}</b> / 100</div>
-        {pos_html}
-        <div class="pick-reason">{reasons_html}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # 注意：HTML 內容必須從行首開始寫，不可縮排。
+    # Streamlit 的 markdown 會把「縮排 4 格以上」的區塊當成 code block，
+    # 導致 <div> 標籤以純文字顯示（就是截圖裡那串 raw HTML）。
+    md_html(f"""
+<div class="pick-card">
+  <div class="pick-top">
+    <span class="pick-name">{prefix}{code} {name_e}</span>
+    <span class="pick-score">{buy:.0f}</span>
+  </div>
+  <div class="pick-sub" style="margin-top:8px;color:var(--text-main);font-size:13.5px;line-height:1.5;"><b>建議：</b>{advice}</div>
+  <div class="pick-sub">{decision} ・ {status} ・ 風險 {risk} ・ 資料 {quality} ・ 現價 {price}
+    ・ 今日 <span class="{c1}">{r1}</span>
+    ・ 5日 <span class="{c5}">{r5}</span>
+    ・ 20日 <span class="{c20}">{r20}</span></div>
+  <div class="pick-sub">風險調整優先級：<b>{pri:.0f}</b> / 100</div>
+  {pos_html}
+  <div class="pick-reason">{reasons_html}</div>
+</div>
+""")
     plan = suggest_price_plan(row)
     if plan:
-        st.markdown(render_price_plan_html(plan), unsafe_allow_html=True)
+        md_html(render_price_plan_html(plan))
 
 
 
@@ -5107,12 +5142,12 @@ MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策",
 
 # --- TAB：盤中即時掃描 ---
 with tab_intraday:
-    st.markdown("""
-    <div class="intraday-hero">
-        <div class="intraday-hero-title">🔥 今日最值得看的股票</div>
-        <div class="intraday-hero-sub">不用懂量化：先看上方 3 張卡片的「建議」與「風險」，再決定要不要點開細節。分數與進階資料都收在下面。</div>
-    </div>
-    """, unsafe_allow_html=True)
+    md_html("""
+<div class="intraday-hero">
+  <div class="intraday-hero-title">🔥 今日最值得看的股票</div>
+  <div class="intraday-hero-sub">不用懂量化：先看上方 3 張卡片的「建議」與「風險」，再決定要不要點開細節。分數與進階資料都收在下面。</div>
+</div>
+""")
 
     u = get_stock_universe()
     if u.empty:
@@ -5155,13 +5190,13 @@ with tab_intraday:
             current_saved_at = st.session_state.get("intraday_scan_saved_at") or live_saved_at
             time_text = str(current_saved_at)[11:16] if current_saved_at and len(str(current_saved_at)) >= 16 else "—"
 
-            st.markdown(f"""
-            <div class="intraday-kpi-grid">
-                <div class="intraday-kpi"><div class="intraday-kpi-label">📊 掃描市場</div><div class="intraday-kpi-value">{len(u):,} <span style="font-size:12px;color:var(--text-sub)">檔</span></div></div>
-                <div class="intraday-kpi"><div class="intraday-kpi-label">🕒 資料時間</div><div class="intraday-kpi-value">{time_text}</div></div>
-                <div class="intraday-kpi"><div class="intraday-kpi-label">⚡ 今日更新</div><div class="intraday-kpi-value">0 <span style="font-size:12px;color:var(--text-sub)">次 FinMind</span></div></div>
-            </div>
-            """, unsafe_allow_html=True)
+            md_html(f"""
+<div class="intraday-kpi-grid">
+    <div class="intraday-kpi"><div class="intraday-kpi-label">📊 掃描市場</div><div class="intraday-kpi-value">{len(u):,} <span style="font-size:12px;color:var(--text-sub)">檔</span></div></div>
+    <div class="intraday-kpi"><div class="intraday-kpi-label">🕒 資料時間</div><div class="intraday-kpi-value">{time_text}</div></div>
+    <div class="intraday-kpi"><div class="intraday-kpi-label">⚡ 今日更新</div><div class="intraday-kpi-value">0 <span style="font-size:12px;color:var(--text-sub)">次 FinMind</span></div></div>
+</div>
+""")
             st.caption("📌 這裡的報價是「按下掃描當下」的即時快照，不會自己持續跳動；要看最新價格請按「強制重抓」，或開啟上面的「自動更新」。")
 
             scan_col1, scan_col2 = st.columns([3, 1.5])
@@ -5333,7 +5368,7 @@ with tab_intraday:
 
                 # IMPORTANT: keep all cards inside ONE continuous HTML block.
                 cards_html = "<div class='intraday-pick-grid'>" + "".join(cards) + "</div>"
-                st.markdown(cards_html, unsafe_allow_html=True)
+                md_html(cards_html)
 
                 st.markdown("### 🔎 查看分析（想看分數與細節再點開）")
                 for _, r in top3.iterrows():
@@ -5367,17 +5402,17 @@ with tab_intraday:
                         reaction_text = "—" if pd.isna(reaction) else f"{reaction:.0f}"
 
                         st.markdown("<div class='intraday-detail-title'>🧠 分數拆解（進階）</div>", unsafe_allow_html=True)
-                        st.markdown(f"""
-                        <div class="intraday-detail-grid">
-                            <div class="intraday-detail-box"><div class="label">買進分</div><div class="value">{base_text}</div></div>
-                            <div class="intraday-detail-box"><div class="label">盤中動能</div><div class="value">{mom_text}</div></div>
-                            <div class="intraday-detail-box"><div class="label">反應分</div><div class="value">{reaction_text}</div></div>
-                            <div class="intraday-detail-box"><div class="label">盤中 AI</div><div class="value">{ai_text}</div></div>
-                            <div class="intraday-detail-box"><div class="label">成交金額</div><div class="value">{turnover_text}</div></div>
-                            <div class="intraday-detail-box"><div class="label">風險</div><div class="value">{risk}</div></div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        st.markdown(f"**🎯 建議動作：{action}**")
+                        md_html(f"""
+<div class="intraday-detail-grid">
+    <div class="intraday-detail-box"><div class="label">買進分</div><div class="value">{base_text}</div></div>
+    <div class="intraday-detail-box"><div class="label">盤中動能</div><div class="value">{mom_text}</div></div>
+    <div class="intraday-detail-box"><div class="label">反應分</div><div class="value">{reaction_text}</div></div>
+    <div class="intraday-detail-box"><div class="label">盤中 AI</div><div class="value">{html.escape(str(ai_text))}</div></div>
+    <div class="intraday-detail-box"><div class="label">成交金額</div><div class="value">{turnover_text}</div></div>
+    <div class="intraday-detail-box"><div class="label">風險</div><div class="value">{html.escape(str(risk or ""))}</div></div>
+</div>
+""")
+                        st.markdown(f"**🎯 建議動作：{html.escape(str(action))}**")
                         st.caption(f"模型決策：{formal_decision}　｜　盤後狀態：{status}　｜　資料品質：{quality}　｜　昨日反應：{hot_signal}")
                         st.markdown(f"**⚡ 盤中變化：** {r.get('盤中變化','🟡 盤中中性')}　　**AI：** {base_text} → {ai_text}　**變化：** {delta_text}")
                         _quote_time = str(r.get("報價時間", "") or "").strip()
@@ -5390,7 +5425,7 @@ with tab_intraday:
                             _quote_time_text = "（此股目前無成交時間資料，價格可能是昨收）"
                         st.markdown(f"**📈 現價：** {current_text} {_quote_time_text}　　**今日：** {pct_text}　　**成交：** {turnover_text}")
                         st.caption("💡 「交易所成交時間」是這個價格真正的最後成交時刻，長時間沒往後跳＝這檔股票本身沒有新成交，不是頁面沒更新。若標示「委買／委賣價」，代表這檔股票今天到目前為止還沒有任何成交，畫面上顯示的是目前最佳掛單價，不是成交價。")
-                        st.markdown(f"**👀 為什麼值得看：** {r.get('關注原因','等待更多盤中訊號確認')}")
+                        st.markdown(f"**👀 為什麼值得看：** {html.escape(str(r.get('關注原因') or '等待更多盤中訊號確認'))}")
                         if "🔴 不買" in str(formal_decision):
                             st.info("盤後模型仍維持「不買」；「等待買點」只代表今天值得重新觀察，不代表可以進場。")
                         elif "🟢 可買" in str(formal_decision):
@@ -5403,7 +5438,7 @@ with tab_intraday:
 
                         plan = suggest_price_plan(r)
                         if plan:
-                            st.markdown(render_price_plan_html(plan), unsafe_allow_html=True)
+                            md_html(render_price_plan_html(plan))
                         else:
                             st.caption("目前資料不足以算出進出場價參考，可到「🔍 股票分析」再查一次這檔。")
 
@@ -5493,27 +5528,27 @@ with tab_intraday:
 # --- TAB：盤後深度掃描 ---
 with tab_eod:
     _rc = regime.get("regime", "UNKNOWN")
-    st.markdown(f"""
-    <div class="regime-card regime-{_rc}" style="margin-bottom:14px;">
-        <div class="regime-title">🌐 今日市場</div>
-        <div class="regime-score-row">
-            <span class="regime-score">{regime['score']:.0f}</span>
-            <span class="regime-unit">分 / 100</span>
-        </div>
-        <div class="regime-msg">{regime['message']}</div>
+    md_html(f"""
+<div class="regime-card regime-{_rc}" style="margin-bottom:14px;">
+    <div class="regime-title">🌐 今日市場</div>
+    <div class="regime-score-row">
+        <span class="regime-score">{regime['score']:.0f}</span>
+        <span class="regime-unit">分 / 100</span>
     </div>
-    """, unsafe_allow_html=True)
+    <div class="regime-msg">{regime['message']}</div>
+</div>
+""")
 
     regime_score = safe_float(regime.get("score"), 50)
     regime_color = "var(--accent-green)" if regime.get("regime") == "BULL" else ("var(--accent-yellow)" if regime.get("regime") == "NEUTRAL" else "var(--accent-red)")
-    st.markdown(f"""
-    <div class="terminal-grid">
-      <div class="terminal-card"><div class="tc-label">MARKET REGIME</div><div class="tc-value" style="color:{regime_color};">{regime.get("regime","UNKNOWN")}</div><div class="tc-sub">{regime.get("message","")}</div></div>
-      <div class="terminal-card"><div class="tc-label">MARKET SCORE</div><div class="tc-value">{regime_score:.0f}<span class="tc-unit">/100</span></div><div class="tc-sub">MA20 / MA60 · MACD · ADX</div></div>
-      <div class="terminal-card"><div class="tc-label">DECISION RULE</div><div class="tc-value">多因子</div><div class="tc-sub">基本面 × 估值 × 籌碼 × 技術</div></div>
-      <div class="terminal-card"><div class="tc-label">DATA POLICY</div><div class="tc-value">PIT</div><div class="tc-sub">歷史訊號不使用未來日期資料</div></div>
-    </div>
-    """, unsafe_allow_html=True)
+    md_html(f"""
+<div class="terminal-grid">
+  <div class="terminal-card"><div class="tc-label">MARKET REGIME</div><div class="tc-value" style="color:{regime_color};">{regime.get("regime","UNKNOWN")}</div><div class="tc-sub">{regime.get("message","")}</div></div>
+  <div class="terminal-card"><div class="tc-label">MARKET SCORE</div><div class="tc-value">{regime_score:.0f}<span class="tc-unit">/100</span></div><div class="tc-sub">MA20 / MA60 · MACD · ADX</div></div>
+  <div class="terminal-card"><div class="tc-label">DECISION RULE</div><div class="tc-value">多因子</div><div class="tc-sub">基本面 × 估值 × 籌碼 × 技術</div></div>
+  <div class="terminal-card"><div class="tc-label">DATA POLICY</div><div class="tc-value">PIT</div><div class="tc-sub">歷史訊號不使用未來日期資料</div></div>
+</div>
+""")
     st.caption("盤後深度模式：完整更新研究資料，產生明日觀察名單。先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。"
                "「盤後」指的是分析用的資料等級（最近一個已收盤交易日的完整資料），不是限制你只能收盤後才能按——"
                "你隨時按「執行盤後深度掃描」都可以，畫面上一律會寫「盤後深度掃描結果」，這是固定名稱，跟你按下去當下是盤中還是已收盤無關。")
@@ -5904,28 +5939,28 @@ with tab_holdings:
         conf_vals = [r.get("續抱信心分") for r in results if not pd.isna(r.get("續抱信心分", np.nan))]
         avg_conf = f"{np.mean(conf_vals):.0f}" if conf_vals else "—"
 
-        st.markdown(f"""
+        md_html(f"""
 <div class="stat-chip-row">
     <div class="stat-chip"><div class="sc-label">庫存檔數</div><div class="sc-value">{len(results)}</div></div>
     <div class="stat-chip"><div class="sc-label">⚠️ 需要注意（停損／出清）</div><div class="sc-value" style="color:var(--accent-red);">{n_stop}</div></div>
     <div class="stat-chip"><div class="sc-label">🎯 可考慮獲利了結</div><div class="sc-value" style="color:var(--accent-green);">{n_profit}</div></div>
     <div class="stat-chip"><div class="sc-label">📈 可考慮加碼／攤平</div><div class="sc-value" style="color:var(--accent-blue);">{n_add}</div></div>
 </div>
-""", unsafe_allow_html=True)
+""")
 
         # V13.1 組合層級風險摘要
         _prs = portfolio_risk_summary(results, equity=1_000_000)
         _avg_cf = f"{_prs['avg_confidence']:.0f}" if not pd.isna(_prs.get("avg_confidence", np.nan)) else "—"
         _upl = _prs.get("total_upl", 0)
         _upl_color = "var(--accent-green)" if _upl >= 0 else "var(--accent-red)"
-        st.markdown(f"""
+        md_html(f"""
 <div class="stat-chip-row" style="margin-top:8px;">
     <div class="stat-chip"><div class="sc-label">組合市值（約）</div><div class="sc-value" style="font-size:18px;">{_prs['total_notional']:,.0f}</div></div>
     <div class="stat-chip"><div class="sc-label">未實現損益合計</div><div class="sc-value" style="font-size:18px; color:{_upl_color};">{_upl:+,.0f}</div></div>
     <div class="stat-chip"><div class="sc-label">平均續抱信心</div><div class="sc-value" style="font-size:18px;">{_avg_cf}</div></div>
     <div class="stat-chip"><div class="sc-label">最大單檔權重（假設100萬）</div><div class="sc-value" style="font-size:18px;">{_prs['max_weight_pct']:.1f}%</div></div>
 </div>
-""", unsafe_allow_html=True)
+""")
         if _prs.get("note"):
             st.caption(f"⚠️ 組合提醒：{_prs['note']}")
 
@@ -5989,19 +6024,19 @@ with tab_holdings:
     {_box("🎯 目標價 2（3R）", t2)}
 </div>"""
 
-            reasons_html = "".join(f"<li>{x}</li>" for x in r.get("理由", []))
+            reasons_html = "".join(f"<li>{html.escape(str(x))}</li>" for x in (r.get("理由") or []))
 
-            st.markdown(f"""
+            md_html(f"""
 <div class="holding-card">
     <div class="hc-top">
-        <div class="hc-name">{r.get('股票代碼','')}<span class="hc-badge" style="background:{badge_bg}; border-color:{badge_border}; color:{badge_color};">{action}</span></div>
+        <div class="hc-name">{html.escape(str(r.get('股票代碼','') or ''))}<span class="hc-badge" style="background:{badge_bg}; border-color:{badge_border}; color:{badge_color};">{html.escape(str(action or ''))}</span></div>
     </div>
     <div class="hc-meta">{meta_html}</div>
     {confidence_html}
     {targets_html}
     <ul class="hc-reasons">{reasons_html}</ul>
 </div>
-""", unsafe_allow_html=True)
+""")
 
         st.caption("以上為量化規則參考建議（依買進分、趨勢強度 ADX、波動度 ATR 與你選擇的風險偏好動態計算），不是投資建議，實際操作請自行判斷並留意資金控管。")
 
@@ -6041,16 +6076,16 @@ with tab_verify:
         }.get(status, "var(--text-sub)")
         status_emoji = {"STABLE": "🟢", "WATCH": "🟡", "DRIFT": "🔴", "INSUFFICIENT": "⚪"}.get(status, "⚪")
 
-        st.markdown(f"""
-        <div class="regime-card" style="border-left:4px solid {status_color}; margin-bottom:14px;">
-            <div class="regime-title">策略健康狀態（以 10D 前瞻為主）</div>
-            <div class="regime-score-row">
-                <span class="regime-score" style="color:{status_color}; font-size:28px;">{status_emoji} {status}</span>
-            </div>
-            <div class="regime-msg">{html.escape(str(perf.get('message','')))}</div>
-            <div class="regime-msg" style="margin-top:8px;"><b>建議行動：</b>{html.escape(str(perf.get('action','')))}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        md_html(f"""
+<div class="regime-card" style="border-left:4px solid {status_color}; margin-bottom:14px;">
+    <div class="regime-title">策略健康狀態（以 10D 前瞻為主）</div>
+    <div class="regime-score-row">
+        <span class="regime-score" style="color:{status_color}; font-size:28px;">{status_emoji} {status}</span>
+    </div>
+    <div class="regime-msg">{html.escape(str(perf.get('message','')))}</div>
+    <div class="regime-msg" style="margin-top:8px;"><b>建議行動：</b>{html.escape(str(perf.get('action','')))}</div>
+</div>
+""")
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("有效樣本", f"{perf.get('n_samples', 0):,}")
@@ -6234,7 +6269,7 @@ with tab_advanced:
         def _card(header, date_text, price_text, status_text, pct, pct_label, note=""):
             color = "#2ecc71" if pct >= 0 else "#e74c3c"
             sign_icon = "🟢" if pct >= 0 else "🔴"
-            st.markdown(f"""
+            md_html(f"""
 <div style="background:#151515;border-radius:14px;padding:20px 24px;border:1px solid #333;height:100%;">
   <div style="font-size:14px;color:#ccc;font-weight:600;margin-bottom:10px;">{header}</div>
   <div style="display:flex;gap:32px;flex-wrap:wrap;">
@@ -6254,7 +6289,7 @@ with tab_advanced:
   </div>
   {f'<div style="font-size:12px;color:#888;margin-top:12px;">{note}</div>' if note else ''}
 </div>
-""", unsafe_allow_html=True)
+""")
 
         def _event_from_trade(t):
             entry_date = pd.Timestamp(t["entry_date"]).strftime("%Y-%m-%d")
@@ -6516,4 +6551,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V13.1 · 驗證紀律 · 參數凍結 · ATR部位建議 · 活體AI戰績 · 組合風險摘要 · 下市股研究宇宙 · 前瞻盲測優先 · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.1.1 · 驗證紀律 · 參數凍結 · ATR部位建議 · 活體AI戰績 · 組合風險摘要 · HTML渲染修正 · 前瞻盲測優先 · 研究輔助非投資建議")
