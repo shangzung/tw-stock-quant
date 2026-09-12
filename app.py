@@ -1094,7 +1094,7 @@ md_html("""
     iframe[title*="viewer_badge"], iframe[title*="Streamlit"] { display: none !important; }
     a[href*="streamlit.io"] { display: none !important; }
 </style>
-""", unsafe_allow_html=True)
+""")
 
 md_html("""
 <div class="terminal-header">
@@ -4554,7 +4554,7 @@ st.sidebar.markdown(f"""
     <div class="regime-msg">{regime['message']}</div>
     {_idx_lines}
 </div>
-""", unsafe_allow_html=True)
+""")
 
 # V13.1：側邊欄顯示 AI戰績健康狀態（若已計算過）
 _perf = st.session_state.get("ai_perf_status")
@@ -5883,7 +5883,7 @@ with tab_holdings:
     <div class="rp-desc">{preset['desc']}</div>
     <div class="rp-num">成本下限 −{preset['base_stop_loss_pct']:.0f}%</div>
 </div>
-""", unsafe_allow_html=True)
+""")
 
     stop_loss_pct = RISK_PROFILE_PRESETS[chosen_profile]["base_stop_loss_pct"]
     with st.expander("⚙️ 進階：手動微調成本下限（一般不用調）", expanded=False):
