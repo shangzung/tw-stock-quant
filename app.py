@@ -4262,6 +4262,7 @@ def trade_costs(notional, fee, tax=0, slippage=0, side="buy"):
 
 
 def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=None, start_date=None, end_date=None, mode=DEFAULT_MODE, scan_mode="盤後"):
+    peak_price = 0
     """單股 Point-in-Time 回測。
     mode：平衡/積極 — 決定進場門檻與停損停利倍數。
     scan_mode：
@@ -4307,16 +4308,36 @@ def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=Non
                 if qty>0:
                     shares=qty; cost=qty*buy; cash-=cost+cost*fee; entry_price=buy
                     entry_date=pd.Timestamp(entry_row["date"]); entry_i=entry_idx; entry_atr=atr; entry_reason=trig_reason
+                    peak_price=buy  # 積極移動停利用
         elif shares>0:
             atr = entry_atr if not pd.isna(entry_atr) and entry_atr>0 else safe_float(row["ATR"])
-            stop=entry_price-stop_mult*atr; target=entry_price+target_mult*atr
             low=safe_float(row.get("min"),price); high=safe_float(row.get("max"),price); exit_price=None; reason=None
-            if low<=stop: exit_price=stop*(1-slippage); reason="STOP"
+            peak_price = max(safe_float(peak_price, entry_price), high if not pd.isna(high) else entry_price)
+            # 標準：固定停損／停利；積極：達一定獲利後改移動停利，減少「起漲抓到卻太早下車」
+            stop=entry_price-stop_mult*atr
+            target=entry_price+target_mult*atr
+            if normalize_mode(mode) == "積極" and not pd.isna(atr) and atr > 0:
+                # 獲利超過 1.5 ATR 後啟動移動停利：停損上移到「最高價 - 2.2 ATR」
+                if peak_price >= entry_price + 1.5 * atr:
+                    trail = peak_price - 2.2 * atr
+                    stop = max(stop, trail)
+                    # 啟動移動停利後取消固定停利，讓趨勢多跑；仍受持有天數限制
+                    target = entry_price + 99 * atr  # 實質關閉固定 TARGET
+                else:
+                    # 尚未啟動移動停利前，停利略放寬（4.2 → 約 5.5 ATR）
+                    target = entry_price + max(target_mult, 5.5) * atr
+            if low<=stop: exit_price=stop*(1-slippage); reason=("TRAIL" if stop > entry_price - stop_mult*atr + 1e-9 else "STOP")
             elif high>=target: exit_price=target*(1-slippage); reason="TARGET"
-            elif i-entry_i>=hold_days: exit_price=safe_float(next_row.get("open"),price)*(1-slippage); reason="TIME"
+            else:
+                # 積極啟動移動停利後，略延長持有上限，避免 6 天就 TIME 出場吃不到主升段
+                eff_hold = hold_days
+                if normalize_mode(mode) == "積極" and not pd.isna(atr) and atr > 0 and peak_price >= entry_price + 1.5 * atr:
+                    eff_hold = max(hold_days, 14)
+                if i - entry_i >= eff_hold:
+                    exit_price=safe_float(next_row.get("open"),price)*(1-slippage); reason="TIME"
             if exit_price:
                 gross=shares*exit_price; sell_cost=gross*(fee+tax); cash+=gross-sell_cost; pnl=(exit_price-entry_price)*shares-(shares*entry_price*fee)-sell_cost
-                trades.append({"entry":entry_price,"exit":exit_price,"pnl":pnl,"reason":reason,"entry_date":entry_date,"exit_date":date,"entry_trigger":entry_reason}); shares=0; entry_price=0
+                trades.append({"entry":entry_price,"exit":exit_price,"pnl":pnl,"reason":reason,"entry_date":entry_date,"exit_date":date,"entry_trigger":entry_reason}); shares=0; entry_price=0; peak_price=0
         equity.append((date,cash+shares*price))
     if not equity:return None
     eq=pd.Series(dict(equity)); bench=get_benchmarks()
