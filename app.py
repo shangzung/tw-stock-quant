@@ -84,9 +84,11 @@ def md_html(content: str):
     st.markdown(textwrap.dedent(str(content)).lstrip("\n"), unsafe_allow_html=True)
 
 
-# =========================
-# V10.0 Strategy Validation Engine
-# =========================
+def md_sidebar(content: str):
+    """側邊欄版 md_html。"""
+    st.sidebar.markdown(textwrap.dedent(str(content)).lstrip("\n"), unsafe_allow_html=True)
+
+
 RESEARCH_LOG_FILE = CACHE_DIR / "research_signal_log.jsonl"
 CALIBRATION_CACHE_FILE = CACHE_DIR / "calibration_result.pkl"
 
@@ -110,6 +112,16 @@ def append_research_snapshot(df, saved_at=None, market_regime=None, market_score
             rows.append(json.dumps(rec, ensure_ascii=False, default=str))
         with RESEARCH_LOG_FILE.open("a", encoding="utf-8") as f:
             f.write("\n".join(rows) + "\n")
+        # session 備援：雲端重啟後檔案可能消失，至少同一次連線內 AI戰績還看得到
+        try:
+            prev = st.session_state.get("research_log_backup")
+            add_df = pd.DataFrame([json.loads(x) for x in rows])
+            if isinstance(prev, pd.DataFrame) and not prev.empty:
+                st.session_state["research_log_backup"] = pd.concat([prev, add_df], ignore_index=True)
+            else:
+                st.session_state["research_log_backup"] = add_df
+        except Exception:
+            pass
         return True
     except Exception as e:
         _log_api_error("append_research_snapshot", "", e)
@@ -4544,15 +4556,15 @@ for _idx_name in ["加權指數", "櫃買指數"]:
                         f'<span class="{_cls}">{_chg_txt}（{_pct_txt}）</span>{_t_txt}</div>')
 if _idx_lines:
     _idx_lines += '<div class="regime-msg" style="opacity:.7;font-size:11px">即時來源：MIS（跟個股即時報價同一套）</div>'
-st.sidebar.markdown(f"""
+md_sidebar(f"""
 <div class="regime-card regime-{_regime_class}">
-    <div class="regime-title">🌐 大盤位階 (Yahoo)</div>
-    <div class="regime-score-row">
-        <span class="regime-score">{regime['score']:.0f}</span>
-        <span class="regime-unit">分 / 100</span>
-    </div>
-    <div class="regime-msg">{regime['message']}</div>
-    {_idx_lines}
+  <div class="regime-title">🌐 大盤位階 (Yahoo)</div>
+  <div class="regime-score-row">
+    <span class="regime-score">{regime['score']:.0f}</span>
+    <span class="regime-unit">分 / 100</span>
+  </div>
+  <div class="regime-msg">{html.escape(str(regime.get('message', '') or ''))}</div>
+  {_idx_lines}
 </div>
 """)
 
@@ -4562,18 +4574,18 @@ if isinstance(_perf, dict) and _perf.get("status"):
     _ps = _perf["status"]
     _pcolor = {"STABLE": "var(--accent-green)", "WATCH": "var(--accent-yellow)", "DRIFT": "var(--accent-red)"}.get(_ps, "var(--text-sub)")
     _pemoji = {"STABLE": "🟢", "WATCH": "🟡", "DRIFT": "🔴", "INSUFFICIENT": "⚪"}.get(_ps, "⚪")
-    st.sidebar.markdown(f"""
+    md_sidebar(f"""
 <div class="regime-card" style="border-left:4px solid {_pcolor}; margin-top:8px;">
-    <div class="regime-title">🏆 AI戰績狀態</div>
-    <div class="regime-msg">{_pemoji} <b>{_ps}</b> · 樣本 {_perf.get('n_samples', 0)}</div>
-    <div class="regime-msg" style="font-size:11.5px;opacity:.9;">{html.escape(str(_perf.get('action','')[:80]))}</div>
+  <div class="regime-title">🏆 AI戰績狀態</div>
+  <div class="regime-msg">{_pemoji} <b>{html.escape(str(_ps))}</b> · 樣本 {_perf.get('n_samples', 0)}</div>
+  <div class="regime-msg" style="font-size:11.5px;opacity:.9;">{html.escape(str(_perf.get('action','')[:80]))}</div>
 </div>
-""", unsafe_allow_html=True)
+""")
     if _ps == "DRIFT":
         st.sidebar.warning("策略出現 DRIFT，建議降低曝險。詳見「🏆 AI戰績」。")
 
 st.sidebar.caption("Token、API 診斷、回測費率等研究員參數請至「⚙️ 系統設定」分頁調整。")
-st.sidebar.markdown("""
+md_sidebar("""
 <div class="legend-card">
   <div class="legend-title">🎨 顏色說明（台股標準）</div>
   <div class="legend-row"><span class="legend-swatch" style="background:var(--tw-up)"></span><span><b style="color:var(--tw-up)">紅色</b>＝上漲／正報酬</span></div>
@@ -4584,7 +4596,7 @@ st.sidebar.markdown("""
   <div class="legend-row"><span class="legend-swatch" style="background:var(--decision-watch)"></span><span>決策：觀察</span></div>
   <div class="legend-row"><span class="legend-swatch" style="background:var(--decision-stop)"></span><span>決策：不可買</span></div>
 </div>
-""", unsafe_allow_html=True)
+""")
 
 
 def render_settings_tab():
@@ -6048,21 +6060,57 @@ with tab_verify:
         f"{'🔒 參數已凍結（'+PARAMS_FROZEN_AT+'）' if PARAMS_FROZEN else '⚠️ 參數未凍結'}"
     )
     log = load_research_log()
+    # 雲端（Streamlit Cloud）本機檔案會在重啟後清空；同步把 session 內快照併入顯示
+    if log.empty and isinstance(st.session_state.get("research_log_backup"), pd.DataFrame):
+        log = st.session_state["research_log_backup"]
+    if not log.empty:
+        st.session_state["research_log_backup"] = log
+
+    force_rebuild = st.button("🔄 強制重算 AI戰績", help="清掉暫存校準結果，重新抓價並計算前瞻報酬。")
+    if force_rebuild:
+        st.session_state.pop("calibration_table", None)
+        st.session_state.pop("calibration_detail", None)
+
     if log.empty:
+        st.session_state["ai_perf_status"] = {
+            "status": "INSUFFICIENT", "n_samples": 0, "reliability": "極低（樣本不足，禁止解讀勝率）",
+            "message": "尚無可用前瞻報酬資料。",
+            "action": "請先到「🌙 深度掃描」執行一次盤後掃描，系統會自動留下訊號快照。",
+        }
         st.info("尚未累積每日訊號快照。請先執行「🌙 深度掃描」，系統會自動建立 AI 戰績資料。")
         st.markdown(
-            "- 每天（或定期）跑一次盤後深度掃描 → 自動 `append_research_snapshot`\n"
-            "- 樣本累積到一定筆數後，這裡會顯示勝率、平均報酬與 **STABLE / WATCH / DRIFT** 狀態"
+            "- 每天（或定期）跑一次盤後深度掃描 → 自動留下研究快照\n"
+            "- 樣本累積後，這裡會顯示勝率、平均報酬與 **STABLE / WATCH / DRIFT** 狀態\n"
+            "- 若部署在 **Streamlit Cloud**：重啟後本機快取可能被清空，需再跑掃描累積"
         )
     else:
+        st.caption(f"研究快照：{len(log):,} 列（含歷史訊號）。正在對照後續股價計算前瞻報酬…")
         max_samples = min(500, max(50, len(log)))
-        cal = st.session_state.get("calibration_table", pd.DataFrame())
-        detail = st.session_state.get("calibration_detail", pd.DataFrame())
-        if cal is None or cal.empty:
-            with st.status("🤖 AI戰績自動更新中…", expanded=False):
+        cal = st.session_state.get("calibration_table")
+        detail = st.session_state.get("calibration_detail")
+        need_build = (
+            force_rebuild
+            or cal is None or (isinstance(cal, pd.DataFrame) and cal.empty)
+            or detail is None or (isinstance(detail, pd.DataFrame) and detail.empty)
+        )
+        if need_build:
+            with st.status("🤖 AI戰績自動更新中…", expanded=True) as _st_status:
                 detail, cal = build_forward_calibration(log, max_samples=max_samples)
                 st.session_state["calibration_detail"] = detail
                 st.session_state["calibration_table"] = cal
+                if detail is None or (isinstance(detail, pd.DataFrame) and detail.empty):
+                    _st_status.update(label="⚠️ 快照有了，但還算不出前瞻報酬", state="error")
+                    st.warning(
+                        "已有訊號快照，但對照後續股價後沒有有效樣本。"
+                        "常見原因：訊號太新（還沒走完 5/10/20 個交易日）、價格資料抓不到、或股票代碼異常。"
+                        "請確認 FinMind Token／網路，或等幾個交易日後再重算。"
+                    )
+                else:
+                    _st_status.update(label=f"✅ 已建立 {len(detail)} 筆前瞻樣本", state="complete")
+        if not isinstance(detail, pd.DataFrame):
+            detail = pd.DataFrame()
+        if not isinstance(cal, pd.DataFrame):
+            cal = pd.DataFrame()
         # 統一狀態
         perf = ai_performance_status(detail, cal)
         st.session_state["ai_perf_status"] = perf
