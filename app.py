@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V13.1.1：驗證紀律 + 實盤可用性加強版 + HTML 渲染修正
+# 台股 Quant Compass V13.1.2：弱轉強漲停可給隔日訊號（通用規則）
 # ------------------------------------------------------------
 # 修正說明（繼承 V13.0 全部內容）：
 # 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
@@ -1443,12 +1443,18 @@ def aggressive_breakout_confirmed(daily):
     elif not pd.isna(close_pos) and close_pos >= 0.45:
         pts += 12
 
+    day_pct = (c / prev_c - 1) * 100 if (not pd.isna(prev_c) and prev_c > 0 and not pd.isna(c)) else 0.0
+    # 鎖漲停常伴隨量縮（買不到），不能只因量比低就否決突破
+    locked_limit = day_pct >= 9.5 and (not pd.isna(close_pos) and close_pos >= 0.85)
+
     if vol_ratio >= 2.0:
         pts += 30; reasons.append("爆量確認")
     elif vol_ratio >= 1.5:
         pts += 20; reasons.append("量能放大")
     elif vol_ratio >= 1.2:
         pts += 8
+    elif locked_limit:
+        pts += 18; reasons.append("漲停鎖死（量縮不否決）")
 
     near_high = (not pd.isna(high20) and not pd.isna(c) and high20 > 0 and c >= high20 * 0.97)
     above_ma = (not pd.isna(ma20) and not pd.isna(c) and c > ma20)
@@ -1464,7 +1470,8 @@ def aggressive_breakout_confirmed(daily):
         elif not pd.isna(close_pos) and close_pos >= 0.5:
             pts += 10; reasons.append("跳空後收強")
 
-    confirmed = pts >= 55 and (near_high or above_ma) and vol_ratio >= 1.2
+    vol_ok = vol_ratio >= 1.2 or locked_limit
+    confirmed = pts >= 55 and (near_high or above_ma or locked_limit) and vol_ok
     return bool(confirmed), reasons[:4], float(clamp(pts))
 
 
@@ -1542,10 +1549,11 @@ def detect_chase_risk(ret20, rsi, distance_20_high, day_change_pct=None, rs_exce
     if ret20 >= 0.13:
         soft = True
         reasons.append(f"20日已漲{ret20*100:.0f}%，不宜追價")
-    # 單日大漲且貼近波段高點
-    if day_pct >= 5.0 and (not pd.isna(dist) and dist >= -0.015):
+    # 單日大漲且貼近波段高點 —— 僅在波段已有漲幅時啟動
+    # （避免「探底後起漲第一根大陽／漲停」被直接標成追高而整段沒訊號）
+    if day_pct >= 5.0 and (not pd.isna(dist) and dist >= -0.015) and ret20 >= 0.10:
         soft = True
-        reasons.append(f"當日大漲{day_pct:.1f}%且收近高點")
+        reasons.append(f"當日大漲{day_pct:.1f}%且收近高點（波段已漲）")
     # RSI 偏熱區間
     if rsi >= 70 and ret20 >= 0.09:
         soft = True
@@ -1566,19 +1574,57 @@ def detect_chase_risk(ret20, rsi, distance_20_high, day_change_pct=None, rs_exce
     return hard, soft, uniq[:3]
 
 
+
+def is_weak_to_strong_reversal(daily, day_change_pct):
+    """通用：前一日偏弱／低點區，當日強勢大漲或漲停 → 弱轉強起漲型態。
+    用於避免「探底後隔日漲停」被漲停硬規則整段抹掉（全市場適用，非單一股票特例）。
+    """
+    day_pct = safe_float(day_change_pct, 0)
+    if day_pct < 9.0:
+        return False
+    if daily is None or getattr(daily, "empty", True) or len(daily) < 4:
+        return False
+    try:
+        prev = daily.iloc[-2]
+        prev2 = daily.iloc[-3]
+        prev_c = safe_float(prev.get("close"))
+        prev2_c = safe_float(prev2.get("close"))
+        prev_day_pct = (prev_c / prev2_c - 1) * 100 if (prev2_c and prev2_c > 0 and not pd.isna(prev_c)) else np.nan
+        prev_weak = (not pd.isna(prev_day_pct) and prev_day_pct <= -2.0)
+        # 前收在近 5 日低點區（含當日前）
+        recent = daily.iloc[-6:-1] if len(daily) >= 6 else daily.iloc[:-1]
+        low_col = "min" if "min" in recent.columns else ("low" if "low" in recent.columns else None)
+        near_low = False
+        if low_col and not pd.isna(prev_c):
+            rlow = pd.to_numeric(recent[low_col], errors="coerce").min()
+            if not pd.isna(rlow) and rlow > 0 and prev_c <= rlow * 1.03:
+                near_low = True
+        return bool(prev_weak or near_low)
+    except Exception:
+        return False
+
+
 def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE,
-                   breakout_ok=True, rs_excess=None, threshold_adj=0.0, chase_risk=False):
+                   breakout_ok=True, rs_excess=None, threshold_adj=0.0, chase_risk=False,
+                   weak_to_strong=False):
     """將內部量化分數翻成使用者容易判讀的買賣決策。
     V12.9（賺錢導向）：更嚴追高、標準要求相對強度、積極必須突破確認才給可買。
+    V13.1.2：弱轉強後的漲停，允許給「可買／觀察」（執行點為隔日開盤，不追當日漲停價）。
     """
     mp = get_mode_params(mode)
     mode = normalize_mode(mode)
     buy_th = mp["eod_buy_threshold"] + safe_float(threshold_adj, 0)
     watch_th = mp["eod_watch_threshold"] + max(0, safe_float(threshold_adj, 0) * 0.5)
-    if limit_up:
+    # 漲停：預設勿追；但「弱轉強起漲」允許產生隔日可執行訊號（不在當日追價）
+    if limit_up and not weak_to_strong:
         return "⚠️ 漲停勿追"
+    if limit_up and weak_to_strong and (overheat or (chase_risk and safe_float(score, 0) < buy_th)):
+        # 已是波段過熱的漲停仍擋；起漲初期則往下走正常門檻
+        if overheat:
+            return "🟡 過熱觀察"
     # 嚴格過熱或追高風險：一律不給可買（賺錢第一原則：不買在倒貨前）
-    if overheat or chase_risk:
+    # 弱轉強漲停日：若非 hard 過熱，允許用分數門檻決定可買／觀察
+    if overheat or (chase_risk and not (limit_up and weak_to_strong)):
         return "🟡 過熱觀察"
     if market_regime == "BEAR" and score < buy_th - 3:
         return "🔴 不買"
@@ -3767,11 +3813,17 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         change_20d_pct = (price / ref20_close - 1) * 100 if not pd.isna(ref20_close) and ref20_close > 0 else np.nan
         limit_status = limit_up_status(price, prev_close, safe_float(x.get("max")), safe_float(x.get("min")), day_change_pct)
         th_adj, th_note = calibration_threshold_adjust(mode)
+        weak_to_strong = is_weak_to_strong_reversal(daily, day_change_pct)
+        # 弱轉強＋漲停：鎖停量縮不應否決積極突破（breakthrough 函式已處理；此處再保險）
+        if weak_to_strong and limit_status.startswith("🔒") and mode == "積極" and not breakout_ok:
+            breakout_ok = True
+            conf_reasons = list(conf_reasons or []) + ["弱轉強漲停"]
         decision = decision_label(
             buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"),
             market_regime=regime_dict["regime"], mode=mode,
             breakout_ok=(breakout_ok if mode == "積極" else True),
             rs_excess=rs_excess, threshold_adj=th_adj, chase_risk=chase_risk,
+            weak_to_strong=weak_to_strong,
         )
         priority = decision_priority(buy_score, risk, regime_dict["regime"], status_label)
         quality_inputs = {
@@ -3783,7 +3835,10 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         quality = "🟢 完整" if sum(quality_inputs.values()) == 4 else ("🟡 部分缺資料" if sum(quality_inputs.values()) >= 2 else "🔴 資料不足")
         if mode == "積極":
             if decision == "🟢 可買":
-                explanation = "積極邏輯：突破已確認（量能＋收盤位置），短線動能值得優先關注。"
+                if weak_to_strong and limit_status.startswith("🔒"):
+                    explanation = "積極邏輯：弱轉強後漲停確認起漲；建議等隔日開盤再執行，勿追當日漲停價。"
+                else:
+                    explanation = "積極邏輯：突破已確認（量能＋收盤位置），短線動能值得優先關注。"
             elif decision == "🟡 過熱觀察":
                 explanation = "動能仍強但已有追高風險（波段漲多／大漲日收高），請等回檔，不要追價。"
             elif decision == "⚠️ 漲停勿追":
@@ -3797,7 +3852,10 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
                     explanation = "積極條件部分成立，等待量能或突破再確認。"
         else:
             if decision == "🟢 可買":
-                explanation = "標準邏輯：趨勢結構、相對強度與基本條件較完整，適合一般選股研究。"
+                if weak_to_strong and limit_status.startswith("🔒"):
+                    explanation = "標準邏輯：弱轉強後出現強勢漲停；可列入隔日開盤觀察，勿追當日漲停價。"
+                else:
+                    explanation = "標準邏輯：趨勢結構、相對強度與基本條件較完整，適合一般選股研究。"
             elif decision == "🟡 過熱觀察":
                 explanation = "趨勢仍在但短線偏熱或已大漲一段；標準模式請等回檔，勿追昨收。"
             elif decision == "⚠️ 漲停勿追":
