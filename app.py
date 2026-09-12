@@ -4820,7 +4820,7 @@ with tab_help:
     <div class="help-section-head"><div class="help-num">0</div><div class="help-section-title">第一次用：只要做這兩步</div></div>
     <div class="help-body">
       <ol>
-        <li><b>晚上或收盤後</b>：打開「🌙 深度掃描」→ 按「執行盤後深度掃描」→ 看「明日最值得看」。</li>
+        <li><b>晚上或收盤後</b>：打開「🌙 深度掃描」→ 按「執行盤後深度掃描」→ 只看「🟢 明日可買」。</li>
         <li><b>隔天開盤後</b>：打開「⚡ 今日機會」→ 按「掃描今日盤中機會」→ <b>只看最上面 3 張卡片</b>（建議、風險、現價）。</li>
       </ol>
       不確定就先觀察，不要因為分數高就立刻買。進階研究整頁都可以先不看。
@@ -5561,44 +5561,41 @@ with tab_eod:
   <div class="terminal-card"><div class="tc-label">DATA POLICY</div><div class="tc-value">PIT</div><div class="tc-sub">歷史訊號不使用未來日期資料</div></div>
 </div>
 """)
-    st.caption("盤後深度模式：完整更新研究資料，產生明日觀察名單。先看條件強度，再看風險與資料品質。買進分不是未來報酬率，也不是勝率。"
-               "「盤後」指的是分析用的資料等級（最近一個已收盤交易日的完整資料），不是限制你只能收盤後才能按——"
-               "你隨時按「執行盤後深度掃描」都可以，畫面上一律會寫「盤後深度掃描結果」，這是固定名稱，跟你按下去當下是盤中還是已收盤無關。")
+    st.info(
+        "新手只要做一件事：按下面「執行盤後深度掃描」→ 看「明日可買」。"
+        "不用懂標準／積極、盤中／盤後。系統預設用較穩的標準邏輯。"
+    )
+    st.caption("用最近一個已收盤日的完整資料做研究，找出條件較完整的股票。分數不是勝率、也不是保證賺錢。")
 
     universe_df = get_stock_universe()
     if universe_df.empty:
         st.error("無法取得全市場股票清單，可到「⚙️ 系統設定」的 API 診斷檢查原因。")
     else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            market_choice = st.radio("市場", ["🌐 全市場", "🏛️ 僅上市", "🏬 僅上櫃"], horizontal=True)
-        with c2:
-            strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1)
-        with c3:
-            eod_mode_choice = st.radio(
-                "🎯 選股邏輯",
-                MODE_UI_OPTIONS,
-                horizontal=True, index=0,
-                key="eod_mode_choice",
-                help=(
-                    "標準＝技術趨勢穩健（量能正常、型態完整）；"
-                    "積極＝突破／爆量／資金集中（短線爆發力）。"
-                    "兩種邏輯的掃描結果會分開保留，切換即可查看，不用重跑。"
-                ),
-            )
+        # 新手預設：全市場 + 標準強度 + 標準（平衡）邏輯；進階才展開
+        market_choice = "🌐 全市場"
+        strength_choice = list(SCAN_STRENGTH_CONFIG.keys())[1] if len(SCAN_STRENGTH_CONFIG) > 1 else next(iter(SCAN_STRENGTH_CONFIG))
+        eod_mode_choice = MODE_UI_OPTIONS[0]
         eod_mode = MODE_UI_TO_KEY.get(eod_mode_choice, DEFAULT_MODE)
+        with st.expander("⚙️ 進階選項（一般不用改）", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                market_choice = st.radio("市場", ["🌐 全市場", "🏛️ 僅上市", "🏬 僅上櫃"], horizontal=True, key="eod_market_choice")
+            with c2:
+                strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1, key="eod_strength_choice")
+            with c3:
+                eod_mode_choice = st.radio(
+                    "選股邏輯",
+                    MODE_UI_OPTIONS,
+                    horizontal=True, index=0,
+                    key="eod_mode_choice",
+                    help="標準較穩；積極較衝。新手建議維持標準。",
+                )
+            eod_mode = MODE_UI_TO_KEY.get(eod_mode_choice, DEFAULT_MODE)
         st.session_state["eod_mode"] = eod_mode
 
-        # 三種模式結果各自獨立保留，顯示各自最後掃描時間。
-        _mode_status_bits = []
-        for _m_label in MODE_UI_OPTIONS:
-            _m_key = MODE_UI_TO_KEY[_m_label]
-            _st = get_market_scan_state(_m_key)
-            _bit = f"{_m_label}：{_st['saved_at']}" if _st and _st.get("saved_at") else f"{_m_label}：尚無資料"
-            if _m_key == eod_mode:
-                _bit = f"**{_bit}（目前顯示）**"
-            _mode_status_bits.append(_bit)
-        st.caption("　｜　".join(_mode_status_bits))
+        _st_cur = get_market_scan_state(eod_mode)
+        if _st_cur and _st_cur.get("saved_at"):
+            st.caption(f"目前名單掃描於 {_st_cur['saved_at']}（再按掃描會更新）")
 
         if market_choice == "🏛️ 僅上市": uni = universe_df[universe_df["type"].str.lower() == "twse"]
         elif market_choice == "🏬 僅上櫃": uni = universe_df[universe_df["type"].str.lower() == "tpex"]
@@ -5608,8 +5605,7 @@ with tab_eod:
         scan_size = len(uni) if cfg["prefilter"] is None else min(cfg["prefilter"], len(uni))
         # 初篩每檔 1 次日 K；完整 shortlist 改成 5 個批次 dataset request。
         est_calls = scan_size + 5
-        st.caption(f"「{strength_choice}」盤後先掃約 {scan_size} 檔，再取前 {cfg['topk']} 檔做完整分析；"
-                   f"完整分析改用 5 個批次資料請求，不再逐檔重打 5 次 FinMind。")
+        st.caption(f"將掃描約 {scan_size} 檔，並深入分析前 {cfg['topk']} 檔。")
 
         _quota_limit = 600 if st.session_state.get("token_applied") or has_finmind_secret() else 300
         if est_calls > _quota_limit:
@@ -5706,56 +5702,44 @@ with tab_eod:
         _cur_scan = get_market_scan_state(eod_mode)
         if _cur_scan is not None:
             out_df = _cur_scan.get("out")
-            top5_df = _cur_scan.get("top5")
             _saved_at = _cur_scan.get("saved_at")
             if _saved_at:
-                _now_in_market = is_tw_market_hours()
-                _timing_note = (
-                    "你剛剛是在盤中按的——這裡的「盤後」不是說時間點，是說資料等級：用的是最近一個『已收盤』交易日的完整資料，"
-                    "不會隨盤中報價跳動；下面卡片上的「現價」也是這份收盤資料裡的價格，不是即時報價。"
-                    if _now_in_market else
-                    "現在是非交易時段，這份結果就是名副其實的『盤後』資料。"
-                )
-                st.caption(f"🕓 目前顯示的是【{eod_mode_choice}】{_saved_at} 的盤後深度掃描結果（重開 App 也不會消失；"
-                           f"按「執行盤後深度掃描」只會更新目前選到的這個模式，另一個模式的結果不會被洗掉）。"
-                           f" {_timing_note}")
+                st.caption(f"🕓 掃描時間：{_saved_at}（重開 App 也不會消失，再按一次掃描才會更新）")
 
-            if top5_df is not None and not top5_df.empty:
-                st.subheader("🔥 明日最值得看")
-                for rank, (_, row) in enumerate(top5_df.iterrows(), start=1):
-                    render_pick_card(row, rank)
-
-            _cur_hot = get_hot_stock_state(eod_mode)
-            hot_df = _cur_hot.get("out") if _cur_hot else None
-            if isinstance(hot_df, pd.DataFrame) and not hot_df.empty:
-                hot_hits = hot_df[hot_df["找飆股訊號"] == "🔥 反應強訊號"].head(10)
-                with st.expander(f"🔥 反應強候選（明日開盤參考，共 {len(hot_hits)} 檔達標）", expanded=len(hot_hits) > 0):
-                    st.caption("跟深度研究的「買進分」是兩套獨立訊號：這裡只看昨天自己的跳空幅度、爆量倍數、收盤位置，"
-                               "算得快、也是單股回測「盤中」模式用的同一套公式，但沒有基本面/估值把關，訊號更快也更容易誤觸，僅供快速掃視、不是正式買進訊號。")
-                    if hot_hits.empty:
-                        st.info("目前沒有股票達到反應強門檻；可把上方「選股邏輯」改成「積極」再掃描一次，看更多接近門檻的股票。")
-                    else:
-                        hot_cols = [c for c in ["排名", "股票代碼", "名稱", "反應分", "找飆股訊號", "跳空%", "量比", "收盤位置%", "反應訊號日"] if c in hot_hits.columns]
-                        st.dataframe(
-                            hot_hits[hot_cols], use_container_width=True, hide_index=True,
-                            column_config={
-                                "反應分": st.column_config.ProgressColumn("反應分", min_value=0, max_value=100, format="%.0f"),
-                                "找飆股訊號": st.column_config.TextColumn("昨日反應訊號", width="medium"),
-                            },
-                        )
-
-            st.subheader("📋 盤後深度結果")
-            st.caption("先看「買進分」判斷條件強度，再看「風險／資料品質／風險調整優先級」決定研究順序；不要把買進分直接當成勝率。")
-            show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
-            show_scan_dataframe(out_df[show_cols])
-
+            # 新手主畫面：只先看「可買」
             cands_df = _cur_scan.get("candidates")
-            st.subheader("🟢 明日可優先研究")
+            if cands_df is None and out_df is not None and not out_df.empty and "決策" in out_df.columns:
+                cands_df = out_df[out_df["決策"].astype(str).str.contains("可買", na=False)]
+
+            st.subheader("🟢 明日可買")
+            st.caption("只有這裡列出的，才是系統認為「條件較完整、可列入明天考慮」的股票。不是保證會漲，下單前仍要自己決定。")
             if cands_df is None or cands_df.empty:
-                st.info("這次掃描沒有股票同時通過所有買進條件——今天先觀察就好。")
+                st.warning("這次沒有股票通過「可買」條件。→ 明天可以先觀望，不必勉強找單。")
             else:
-                cols2 = ["名稱"] + MAIN_TABLE_COLS if "名稱" in cands_df.columns else MAIN_TABLE_COLS
-                show_scan_dataframe(cands_df[cols2])
+                show_n = min(5, len(cands_df))
+                st.success(f"共 {len(cands_df)} 檔達標，下面先列出前 {show_n} 檔（依買進分排序）。")
+                for rank, (_, row) in enumerate(cands_df.head(show_n).iterrows(), start=1):
+                    render_pick_card(row, rank)
+                with st.expander(f"📋 全部可買名單（{len(cands_df)} 檔）", expanded=False):
+                    cols2 = ["名稱"] + MAIN_TABLE_COLS if "名稱" in cands_df.columns else MAIN_TABLE_COLS
+                    show_scan_dataframe(cands_df[[c for c in cols2 if c in cands_df.columns]])
+
+            # 其他結果收進進階，避免新手一次看太多
+            with st.expander("📂 更多結果（分數高但未達可買、完整表格）", expanded=False):
+                st.caption("這裡是研究用：包含尚未達「可買」的股票。新手可略過。")
+                if out_df is not None and not out_df.empty:
+                    show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
+                    show_scan_dataframe(out_df[[c for c in show_cols if c in out_df.columns]])
+                _cur_hot = get_hot_stock_state(eod_mode)
+                hot_df = _cur_hot.get("out") if _cur_hot else None
+                if isinstance(hot_df, pd.DataFrame) and not hot_df.empty:
+                    hot_hits = hot_df[hot_df["找飆股訊號"] == "🔥 反應強訊號"].head(10)
+                    st.markdown("**昨日反應較強（僅供參考，不是可買）**")
+                    if hot_hits.empty:
+                        st.caption("沒有達標的反應強股票。")
+                    else:
+                        hot_cols = [c for c in ["排名", "股票代碼", "名稱", "反應分", "找飆股訊號", "跳空%", "量比", "收盤位置%"] if c in hot_hits.columns]
+                        st.dataframe(hot_hits[hot_cols], use_container_width=True, hide_index=True)
 
 # --- TAB：股票分析 ---
 with tab_stock:
