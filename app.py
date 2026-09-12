@@ -1623,46 +1623,34 @@ def is_weak_to_strong_reversal(daily, day_change_pct):
 
 
 def is_trend_acceleration(daily, day_change_pct):
-    """緩漲後再加速（2615 型）：近段非急殺探底，但已有溫和上漲，當日強勢大陽／漲停。
-    與弱轉強互補；不取代 is_weak_to_strong_reversal。
+    """緩漲後再加速（2615 型）：近段已有溫和上漲，當日強勢大陽／近漲停。
+    與弱轉強互補。條件放寬，避免墊高後拉升整段 0 訊號。
     """
     day_pct = safe_float(day_change_pct, 0)
-    if day_pct < 9.0:
+    if day_pct < 8.0:
         return False
-    if daily is None or getattr(daily, "empty", True) or len(daily) < 21:
+    if daily is None or getattr(daily, "empty", True) or len(daily) < 15:
         return False
     try:
         x = daily.iloc[-1]
-        ret20 = safe_float(x.get("RET_20"), np.nan)
-        if pd.isna(ret20):
-            closes = pd.to_numeric(daily["close"], errors="coerce")
-            if len(closes) >= 21 and safe_float(closes.iloc[-21], 0) > 0:
-                ret20 = float(closes.iloc[-1] / closes.iloc[-21] - 1)
-            else:
-                ret20 = np.nan
-        # 已有方向但未噴完：20 日漲幅約 0%～15%
-        if pd.isna(ret20) or ret20 < 0.0 or ret20 > 0.20:
-            return False
-        # 近 5 日不應是崩跌洗盤（那是弱轉強的領域）
         closes = pd.to_numeric(daily["close"], errors="coerce")
+        ret20 = safe_float(x.get("RET_20"), np.nan)
+        if pd.isna(ret20) and len(closes) >= 21 and safe_float(closes.iloc[-21], 0) > 0:
+            ret20 = float(closes.iloc[-1] / closes.iloc[-21] - 1)
+        if pd.isna(ret20):
+            ret20 = 0.0
+        # 允許較寬波段漲幅（墊久再拉的股票常 15～25%）
+        if ret20 < -0.02 or ret20 > 0.28:
+            return False
         rets = closes.pct_change()
         recent = rets.iloc[-6:-1]
-        if (recent <= -0.05).any():
-            return False  # 有急殺 → 交給弱轉強，不走加速
-        # 近 10 日整體偏多或至少不是單邊下跌
-        if len(closes) >= 11:
-            ret10 = float(closes.iloc[-1] / closes.iloc[-11] - 1) if safe_float(closes.iloc[-11], 0) > 0 else 0.0
-            if ret10 < -0.03:
-                return False
-        # 量能：當日至少不極縮（加速日通常有量）
-        vol_ratio = safe_float(x.get("VOL_RATIO"), 1.0)
-        if not pd.isna(vol_ratio) and vol_ratio < 0.9:
-            # 鎖漲停可能量縮，若當日漲停仍放行
-            if day_pct < 9.5:
-                return False
+        # 近 5 日有急殺（<=-6%）→ 交給弱轉強
+        if len(recent) and bool((recent <= -0.06).any()):
+            return False
         return True
     except Exception:
         return False
+
 
 
 def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN", mode=DEFAULT_MODE,
@@ -3879,15 +3867,17 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         weak_to_strong = is_weak_to_strong_reversal(daily, day_change_pct)
         trend_accel = is_trend_acceleration(daily, day_change_pct) if not weak_to_strong else False
         early_limit_ok = bool(weak_to_strong or trend_accel)
-        # 弱轉強／緩漲加速＋漲停：不因鎖停量縮否決突破
-        if early_limit_ok and limit_status.startswith("🔒") and mode == "積極" and not breakout_ok:
+        strong_day = limit_status.startswith("🔒") or safe_float(day_change_pct, 0) >= 8.0
+        if early_limit_ok and strong_day and mode == "積極" and not breakout_ok:
             breakout_ok = True
-            tag = "弱轉強漲停" if weak_to_strong else "緩漲加速漲停"
+            tag = "弱轉強漲停" if weak_to_strong else "緩漲加速"
             conf_reasons = list(conf_reasons or []) + [tag]
-        if early_limit_ok and limit_status.startswith("🔒"):
+        if early_limit_ok and strong_day:
             buy_score = clamp(buy_score + (8 if mode == "積極" else 5))
+        # 漲停鎖死，或（起漲型態 + 當日強勢≥8%）都走 limit 起漲決策
+        limit_flag = limit_status.startswith("🔒") or (early_limit_ok and safe_float(day_change_pct, 0) >= 8.0)
         decision = decision_label(
-            buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"),
+            buy_score, overheat=overheat, limit_up=limit_flag,
             market_regime=regime_dict["regime"], mode=mode,
             breakout_ok=(breakout_ok if mode == "積極" else True),
             rs_excess=rs_excess, threshold_adj=th_adj, chase_risk=chase_risk,
