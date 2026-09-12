@@ -1,5 +1,5 @@
 # app.py
-# 台股 Quant Compass V13.1.3：弱轉強 + 緩漲加速漲停可給隔日訊號
+# 台股 Quant Compass V13.3：產業波段雷達 + 路徑一致性（除息還原全路徑）+ 弱轉強/緩漲加速
 # ------------------------------------------------------------
 # 修正說明（繼承 V13.0 全部內容）：
 # 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
@@ -1387,6 +1387,182 @@ def normalize_mode(mode):
 
 def get_mode_params(mode):
     return STRATEGY_MODES.get(normalize_mode(mode), STRATEGY_MODES[DEFAULT_MODE])
+
+
+# =========================
+# V13.3 產業雷達 + 路徑一致性共用
+# =========================
+# FinMind industry_category → 實戰大類（電子／金融／航運…）
+INDUSTRY_GROUP_MAP = {
+    "半導體": "電子", "電子工業": "電子", "電腦及週邊設備": "電子",
+    "光電業": "電子", "通信網路業": "電子", "電子零組件": "電子",
+    "資訊服務業": "電子", "其他電子業": "電子", "電器電纜": "電子",
+    "電子通路業": "電子", "半導體業": "電子",
+    "金融保險": "金融", "金融業": "金融", "銀行業": "金融",
+    "保險業": "金融", "金控": "金融", "證券": "金融",
+    "航運業": "航運", "海運": "航運", "空運": "航運", "運輸": "航運",
+    "鋼鐵工業": "鋼鐵", "鋼鐵": "鋼鐵",
+    "塑膠工業": "塑化", "化學工業": "塑化", "橡膠工業": "塑化",
+    "油電燃氣業": "塑化", "化學生技醫療": "塑化",
+    "生技醫療業": "生技", "生技": "生技", "醫療": "生技", "生技醫療": "生技",
+    "建材營造": "營建", "營造": "營建", "建設": "營建", "建材": "營建",
+    "綠能環保": "綠能", "太陽能": "綠能", "風力": "綠能", "環保": "綠能",
+    "觀光事業": "觀光", "觀光": "觀光", "餐飲": "觀光", "飯店": "觀光",
+    "貿易百貨": "其他", "電機機械": "其他", "汽車工業": "其他",
+    "紡織纖維": "其他", "造紙工業": "其他", "玻璃陶瓷": "其他",
+    "水泥工業": "其他", "食品工業": "其他", "運動休閒": "其他",
+    "居家生活": "其他", "數位雲端": "其他", "文化創意業": "其他",
+    "農業科技": "其他", "其他": "其他",
+}
+
+PRIORITY_INDUSTRY_GROUPS = [
+    "電子", "金融", "航運", "鋼鐵", "塑化", "生技", "營建", "綠能", "觀光", "其他",
+]
+
+
+def map_industry_group(raw_category) -> str:
+    """把 FinMind 原始產業字串映射到大類；找不到就回「其他」。"""
+    if raw_category is None:
+        return "其他"
+    try:
+        if pd.isna(raw_category):
+            return "其他"
+    except Exception:
+        pass
+    s = str(raw_category).strip()
+    if not s:
+        return "其他"
+    if s in INDUSTRY_GROUP_MAP:
+        return INDUSTRY_GROUP_MAP[s]
+    for key, group in INDUSTRY_GROUP_MAP.items():
+        if key in s:
+            return group
+    return "其他"
+
+
+def build_industry_lookup(universe_df) -> dict:
+    """stock_id → {產業原始, 所屬產業}"""
+    if universe_df is None or (hasattr(universe_df, "empty") and universe_df.empty):
+        return {}
+    out = {}
+    for _, r in universe_df.iterrows():
+        sid = str(r.get("stock_id", "")).strip()
+        if not sid:
+            continue
+        raw = r.get("industry_category", "")
+        out[sid] = {"產業原始": raw if raw is not None else "", "所屬產業": map_industry_group(raw)}
+    return out
+
+
+def enrich_scan_result(df, universe_df, signal_date=None, research_log=None):
+    """
+    掃描／回測結果統一補齊雷達欄位：
+      所屬產業、訊號日期、自訊號以來漲幅、產業內排名
+    """
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return df
+    out = df.copy()
+    lookup = build_industry_lookup(universe_df)
+
+    if "股票代碼" in out.columns:
+        out["所屬產業"] = out["股票代碼"].astype(str).map(
+            lambda x: lookup.get(x, {}).get("所屬產業", "其他")
+        )
+        out["產業原始"] = out["股票代碼"].astype(str).map(
+            lambda x: lookup.get(x, {}).get("產業原始", "")
+        )
+
+    if signal_date is None:
+        try:
+            signal_date = now_tw().strftime("%Y-%m-%d")
+        except Exception:
+            signal_date = datetime.now().strftime("%Y-%m-%d")
+    if "日期" in out.columns:
+        out["訊號日期"] = out["日期"].astype(str)
+    else:
+        out["訊號日期"] = signal_date
+
+    out["自訊號以來漲幅"] = np.nan
+    if research_log is not None and not getattr(research_log, "empty", True) and "股票代碼" in research_log.columns:
+        try:
+            log = research_log.copy()
+            if "日期" in log.columns:
+                log["signal_date"] = pd.to_datetime(log["日期"], errors="coerce")
+            elif "snapshot_at" in log.columns:
+                log["signal_date"] = pd.to_datetime(log["snapshot_at"], errors="coerce")
+            else:
+                log["signal_date"] = pd.NaT
+            log = log.dropna(subset=["signal_date"])
+            if "決策" in log.columns:
+                log = log[log["決策"].astype(str).str.contains("可買", na=False)]
+            for i, row in out.iterrows():
+                sid = str(row.get("股票代碼", ""))
+                cur_px = safe_float(row.get("現價"))
+                hist = log[log["股票代碼"].astype(str) == sid].sort_values("signal_date")
+                if hist.empty or pd.isna(cur_px) or cur_px <= 0:
+                    out.at[i, "自訊號以來漲幅"] = safe_float(row.get("近1日漲跌%"), np.nan)
+                    continue
+                sig = pd.Timestamp(str(row.get("訊號日期", signal_date)))
+                past = hist[hist["signal_date"] <= sig]
+                if past.empty:
+                    out.at[i, "自訊號以來漲幅"] = safe_float(row.get("近1日漲跌%"), np.nan)
+                    continue
+                last_sig = past.iloc[-1]
+                entry = safe_float(last_sig.get("現價"))
+                if entry and entry > 0:
+                    out.at[i, "自訊號以來漲幅"] = round((cur_px / entry - 1) * 100, 2)
+                else:
+                    out.at[i, "自訊號以來漲幅"] = safe_float(row.get("近1日漲跌%"), np.nan)
+        except Exception:
+            if "近1日漲跌%" in out.columns:
+                out["自訊號以來漲幅"] = out["近1日漲跌%"]
+    else:
+        if "近1日漲跌%" in out.columns:
+            out["自訊號以來漲幅"] = out["近1日漲跌%"]
+
+    if "所屬產業" in out.columns and "買進分" in out.columns:
+        out["產業內排名"] = (
+            out.groupby("所屬產業")["買進分"]
+            .rank(method="min", ascending=False)
+            .astype("Int64")
+        )
+    else:
+        out["產業內排名"] = pd.NA
+
+    preferred = [
+        "股票代碼", "名稱", "所屬產業", "訊號日期", "買進分", "決策",
+        "自訊號以來漲幅", "產業內排名",
+        "優先級", "現價", "狀態", "風險", "資料品質",
+        "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "量比",
+        "突破確認", "說明", "產業原始",
+    ]
+    cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
+    return out[cols]
+
+
+def add_tech_with_dividend(sources, as_of_date=None):
+    """
+    路徑一致性唯一入口：永遠用 point-in-time 除息事件做還原後再算技術指標。
+    單股回測、除錯表、任何需要 daily 指標且會影響決策的地方都應呼叫這個。
+    close/open/max/min 原始成交價不變；MA/HIGH_20/RET 等用還原價。
+    """
+    daily = sources.get("daily", pd.DataFrame()) if isinstance(sources, dict) else pd.DataFrame()
+    if daily is None or daily.empty:
+        return pd.DataFrame()
+    if as_of_date is None:
+        try:
+            as_of = pd.Timestamp(now_tw().date())
+        except Exception:
+            as_of = pd.Timestamp(datetime.now().date())
+    else:
+        as_of = pd.Timestamp(as_of_date)
+    div_raw = sources.get("dividend", pd.DataFrame()) if isinstance(sources, dict) else pd.DataFrame()
+    try:
+        div_pit = point_in_time_filter(div_raw, as_of)
+    except Exception:
+        div_pit = div_raw if div_raw is not None else pd.DataFrame()
+    return add_technical_indicators(daily, dividend_events=div_pit)
+
 
 
 def relative_strength_score(stock_ret20, mkt_ret20):
@@ -4416,7 +4592,7 @@ def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=Non
     mp = get_mode_params(mode)
     if hold_days is None: hold_days = mp["hold_days"]
     stop_mult, target_mult = mp["stop_atr"], mp["target_atr"]
-    sources=prepare_pit_sources(stock_id,1500); daily=add_technical_indicators(sources["daily"])
+    sources=prepare_pit_sources(stock_id,1500); daily=add_tech_with_dividend(sources)
     if daily.empty or len(daily)<250: return None
     daily["date"]=pd.to_datetime(daily["date"], errors="coerce")
     mkt=get_yahoo_taiex(); equity=[]; trades=[]; cash=float(initial_capital); shares=0; entry_price=0; entry_date=None; entry_i=0; entry_atr=np.nan; entry_reason=""
@@ -4645,7 +4821,7 @@ def strategy_leaderboard(stocks, initial_capital, fee, tax, slippage, start_date
 def portfolio_backtest(stocks, initial_capital, top_n, fee=0.001425, tax=0.003, slippage=0.0015, rebalance_days=20, progress_cb=None, max_workers=3):
     data={}
     def load_one(s):
-        src=prepare_pit_sources(s,1500); d=add_technical_indicators(src["daily"])
+        src=prepare_pit_sources(s,1500); d=add_tech_with_dividend(src)
         return s, src if not d.empty else None
     loaded = parallel_map(stocks, load_one, max_workers=max_workers)
     for idx, item in enumerate(loaded):
@@ -5370,6 +5546,10 @@ def scan_column_config():
         cfg["買進分"] = st.column_config.ProgressColumn("買進分", min_value=0, max_value=100, format="%.0f", help="0–100 條件強度；不是未來報酬率或勝率。")
         cfg["優先級"] = st.column_config.ProgressColumn("風險調整優先級", min_value=0, max_value=100, format="%.0f", help="買進分扣除風險、市況與過熱懲罰後的研究排序分。")
         cfg["決策"] = st.column_config.TextColumn("決策", width="small")
+        cfg["所屬產業"] = st.column_config.TextColumn("所屬產業", width="small")
+        cfg["訊號日期"] = st.column_config.TextColumn("訊號日期", width="small")
+        cfg["自訊號以來漲幅"] = st.column_config.NumberColumn("自訊號以來漲幅", format="%.1f%%")
+        cfg["產業內排名"] = st.column_config.NumberColumn("產業內排名", format="%d")
         cfg["狀態"] = st.column_config.TextColumn("狀態", width="medium")
         cfg["風險"] = st.column_config.TextColumn("風險", width="small")
         cfg["資料品質"] = st.column_config.TextColumn("資料品質", width="small")
@@ -5389,7 +5569,13 @@ def show_scan_dataframe(df):
     shown = shown[order]
     st.dataframe(style_scan_table(shown), use_container_width=True, hide_index=True, column_config=scan_column_config())
 
-MAIN_TABLE_COLS = ["股票代碼", "現價", "買進分", "優先級", "決策", "狀態", "風險", "資料品質", "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "量比", "漲停狀態", "趨勢", "說明"]
+MAIN_TABLE_COLS = [
+    "股票代碼", "名稱", "所屬產業", "訊號日期", "買進分", "決策",
+    "自訊號以來漲幅", "產業內排名",
+    "現價", "優先級", "狀態", "風險", "資料品質",
+    "近1日漲跌%", "近5日漲跌%", "近20日漲跌%", "量比",
+    "突破確認", "說明", "漲停狀態", "趨勢",
+]
 
 # --- TAB：盤中即時掃描 ---
 with tab_intraday:
@@ -5921,8 +6107,19 @@ with tab_eod:
                         out = pd.DataFrame(final_rows).sort_values("買進分", ascending=False)
                         name_map = universe_df.set_index("stock_id")["stock_name"].to_dict() if "stock_name" in universe_df.columns else {}
                         out.insert(1, "名稱", out["股票代碼"].map(name_map).fillna(""))
-                        candidates = out[out["決策"].isin(["🟢 可買"])]
                         _saved_at = now_tw().strftime("%Y-%m-%d %H:%M:%S")
+                        _sig_date = now_tw().strftime("%Y-%m-%d")
+                        try:
+                            _log_for_enrich = load_research_log()
+                        except Exception:
+                            _log_for_enrich = pd.DataFrame()
+                        out = enrich_scan_result(
+                            out,
+                            universe_df=universe_df,
+                            signal_date=_sig_date,
+                            research_log=_log_for_enrich if _log_for_enrich is not None and not _log_for_enrich.empty else None,
+                        )
+                        candidates = out[out["決策"].astype(str).str.contains("可買", na=False)].copy()
                         _payload = {"out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at}
 
                         # 依模式（穩健／積極）分開存進 session state，兩邊互不覆蓋——
@@ -5945,10 +6142,56 @@ with tab_eod:
             if _saved_at:
                 st.caption(f"🕓 掃描時間：{_saved_at}（重開 App 也不會消失，再按一次掃描才會更新）")
 
+            # 若舊快取沒有產業欄，即時補齊（不重跑掃描）
+            if out_df is not None and not out_df.empty and "所屬產業" not in out_df.columns:
+                try:
+                    _log_tmp = load_research_log()
+                    out_df = enrich_scan_result(
+                        out_df, universe_df=universe_df,
+                        signal_date=(_saved_at[:10] if _saved_at else None),
+                        research_log=_log_tmp if _log_tmp is not None and not _log_tmp.empty else None,
+                    )
+                except Exception:
+                    pass
+
+            # ── 產業波段雷達控制列 ──
+            st.subheader("🏭 產業波段雷達")
+            st.caption("一鍵掃描結果依產業整理：可篩選產業、只看可買、或依產業分組檢視資金輪動。")
+            _avail_inds = []
+            if out_df is not None and not out_df.empty and "所屬產業" in out_df.columns:
+                _present = set(out_df["所屬產業"].astype(str).unique())
+                _avail_inds = [g for g in PRIORITY_INDUSTRY_GROUPS if g in _present]
+                for g in sorted(_present):
+                    if g not in _avail_inds:
+                        _avail_inds.append(g)
+            _ind_options = ["全部"] + _avail_inds
+            _rc1, _rc2, _rc3 = st.columns([2, 1, 1])
+            with _rc1:
+                _pick_ind = st.selectbox("產業篩選", _ind_options, key="eod_industry_filter")
+            with _rc2:
+                _only_buy = st.checkbox("只看 🟢 可買", value=False, key="eod_only_buy")
+            with _rc3:
+                _group_view = st.checkbox("依產業分組", value=True, key="eod_group_by_industry")
+
+            _view = out_df.copy() if out_df is not None and not out_df.empty else pd.DataFrame()
+            if not _view.empty:
+                if _pick_ind != "全部" and "所屬產業" in _view.columns:
+                    _view = _view[_view["所屬產業"] == _pick_ind]
+                if _only_buy and "決策" in _view.columns:
+                    _view = _view[_view["決策"].astype(str).str.contains("可買", na=False)]
+
             # 新手主畫面：只先看「可買」
             cands_df = _cur_scan.get("candidates")
             if cands_df is None and out_df is not None and not out_df.empty and "決策" in out_df.columns:
                 cands_df = out_df[out_df["決策"].astype(str).str.contains("可買", na=False)]
+            # 若 candidates 缺產業欄，與 out 對齊
+            if cands_df is not None and not cands_df.empty and "所屬產業" not in cands_df.columns and out_df is not None and "所屬產業" in out_df.columns:
+                try:
+                    cands_df = enrich_scan_result(cands_df, universe_df=universe_df, signal_date=(_saved_at[:10] if _saved_at else None))
+                except Exception:
+                    pass
+            if cands_df is not None and not cands_df.empty and _pick_ind != "全部" and "所屬產業" in cands_df.columns:
+                cands_df = cands_df[cands_df["所屬產業"] == _pick_ind]
 
             st.subheader("🟢 明日可買")
             st.caption("只有這裡列出的，才是系統認為「條件較完整、可列入明天考慮」的股票。不是保證會漲，下單前仍要自己決定。")
@@ -5960,15 +6203,28 @@ with tab_eod:
                 for rank, (_, row) in enumerate(cands_df.head(show_n).iterrows(), start=1):
                     render_pick_card(row, rank)
                 with st.expander(f"📋 全部可買名單（{len(cands_df)} 檔）", expanded=False):
-                    cols2 = ["名稱"] + MAIN_TABLE_COLS if "名稱" in cands_df.columns else MAIN_TABLE_COLS
-                    show_scan_dataframe(cands_df[[c for c in cols2 if c in cands_df.columns]])
+                    show_scan_dataframe(cands_df)
 
-            # 其他結果收進進階，避免新手一次看太多
-            with st.expander("📂 更多結果（分數高但未達可買、完整表格）", expanded=False):
-                st.caption("這裡是研究用：包含尚未達「可買」的股票。新手可略過。")
-                if out_df is not None and not out_df.empty:
-                    show_cols = ["名稱"] + MAIN_TABLE_COLS if "名稱" in out_df.columns else MAIN_TABLE_COLS
-                    show_scan_dataframe(out_df[[c for c in show_cols if c in out_df.columns]])
+            # 產業分組／完整表格
+            with st.expander("📂 產業分組與完整結果（分數高但未達可買也可看）", expanded=bool(_group_view)):
+                st.caption("依產業整理掃描結果，方便觀察族群強弱與資金輪動。新手可先只看上方可買卡片。")
+                if _view is None or _view.empty:
+                    st.info("目前沒有可顯示的結果（可能被產業篩選濾空）。")
+                elif _group_view and "所屬產業" in _view.columns:
+                    # 依 PRIORITY 順序分組
+                    _order = [g for g in PRIORITY_INDUSTRY_GROUPS if g in set(_view["所屬產業"].astype(str))]
+                    for _extra in sorted(set(_view["所屬產業"].astype(str)) - set(_order)):
+                        _order.append(_extra)
+                    for _ind in _order:
+                        _g = _view[_view["所屬產業"] == _ind].sort_values("買進分", ascending=False)
+                        if _g.empty:
+                            continue
+                        _n_buy = int(_g["決策"].astype(str).str.contains("可買", na=False).sum()) if "決策" in _g.columns else 0
+                        st.markdown(f"### {_ind}（{_g.shape[0]} 檔｜可買 {_n_buy}）")
+                        show_scan_dataframe(_g)
+                else:
+                    show_scan_dataframe(_view)
+
                 _cur_hot = get_hot_stock_state(eod_mode)
                 hot_df = _cur_hot.get("out") if _cur_hot else None
                 if isinstance(hot_df, pd.DataFrame) and not hot_df.empty:
@@ -6475,7 +6731,7 @@ with tab_advanced:
                 rows=[]; prog=st.progress(0)
                 for si,sid in enumerate(stocks):
                     try:
-                        src=prepare_pit_sources(sid,1800); d=src["daily"]
+                        src=prepare_pit_sources(sid,1800); d=add_tech_with_dividend(src)
                         if d.empty: continue
                         d["date"]=pd.to_datetime(d["date"]); yd=d[d["date"].dt.year==target_year]
                         trades=[]; holding=False; entry=None; entry_i=None; cash=initial_capital
@@ -6638,7 +6894,7 @@ with tab_advanced:
                 with st.expander("🔎 為什麼沒買點？查看每日決策（除錯）", expanded=True):
                     try:
                         _dbg_src = prepare_pit_sources(single_stock_input, 1500)
-                        _dbg_d = add_technical_indicators(_dbg_src.get("daily", pd.DataFrame()))
+                        _dbg_d = add_tech_with_dividend(_dbg_src)
                         if _dbg_d is None or _dbg_d.empty:
                             st.caption("無法取得日K，無法列出每日決策。")
                         else:
@@ -6873,4 +7129,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V13.1.1 · 驗證紀律 · 參數凍結 · ATR部位建議 · 活體AI戰績 · 組合風險摘要 · HTML渲染修正 · 前瞻盲測優先 · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.3 · 產業波段雷達 · 路徑一致性 · 除息還原全路徑 · 參數凍結 · ATR部位建議 · 活體AI戰績 · 前瞻盲測優先 · 研究輔助非投資建議")
