@@ -1669,12 +1669,13 @@ def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN
     early_limit_ok = bool(weak_to_strong or trend_accel)
     if limit_up and not early_limit_ok:
         return "⚠️ 漲停勿追"
-    if overheat:
-        return "🟡 過熱觀察"
-    # 弱轉強 或 緩漲加速 + 漲停：型態本身給可買（隔日開盤）
+    # 起漲型態（弱轉強／緩漲加速）優先於過熱：
+    # 加速日 RSI 常瞬間飆高，若先判過熱會把可買整段擋掉（2615 類主因）
     if limit_up and early_limit_ok:
         return "🟢 可買"
-    # 嚴格追高：非起漲初期仍不給可買
+    if overheat:
+        return "🟡 過熱觀察"
+    # 嚴格追高：非起漲型態仍不給可買
     if chase_risk:
         return "🟡 過熱觀察"
     if market_regime == "BEAR" and score < buy_th - 3:
