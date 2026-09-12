@@ -4359,14 +4359,15 @@ def backtest_single(stock_id, initial_capital, fee, tax, slippage, hold_days=Non
             stop=entry_price-stop_mult*atr
             target=entry_price+target_mult*atr
             if normalize_mode(mode) == "積極" and not pd.isna(atr) and atr > 0:
-                # 獲利超過 1.5 ATR 後啟動移動停利：停損上移到「最高價 - 2.2 ATR」
-                if peak_price >= entry_price + 1.5 * atr:
-                    trail = peak_price - 2.2 * atr
+                held_days = i - entry_i
+                # 進場當天不啟動移動停利（避免 2615 這類長紅當日回檔被立刻掃出）
+                # 獲利超過 2.0 ATR 且持有至少 1 日後，才用「最高價 - 2.8 ATR」移動停利
+                if held_days >= 1 and peak_price >= entry_price + 2.0 * atr:
+                    trail = peak_price - 2.8 * atr
                     stop = max(stop, trail)
-                    # 啟動移動停利後取消固定停利，讓趨勢多跑；仍受持有天數限制
-                    target = entry_price + 99 * atr  # 實質關閉固定 TARGET
+                    target = entry_price + 99 * atr  # 關閉固定 TARGET，交給移動停利
                 else:
-                    # 尚未啟動移動停利前，停利略放寬（4.2 → 約 5.5 ATR）
+                    # 前幾日用略放寬的固定停利
                     target = entry_price + max(target_mult, 5.5) * atr
             if low<=stop: exit_price=stop*(1-slippage); reason=("TRAIL" if stop > entry_price - stop_mult*atr + 1e-9 else "STOP")
             elif high>=target: exit_price=target*(1-slippage); reason="TARGET"
