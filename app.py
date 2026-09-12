@@ -1637,15 +1637,10 @@ def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN
         return "⚠️ 漲停勿追"
     if overheat:
         return "🟡 過熱觀察"
-    # 起漲初期漲停：用較寬的可買門檻（約觀察線+8），避免探底反擊時分數被技術面拖太低而整段 0 訊號
+    # 起漲初期／弱轉強漲停：型態本身視為隔日可執行訊號（不追當日漲停價）
+    # 不再被急殺後偏低的買進分卡住——這正是 5351 類案例整段 0 訊號的主因
     if limit_up and weak_to_strong:
-        s = safe_float(score, 0)
-        wts_buy = min(buy_th, watch_th + 8)  # 積極約 63；標準約 76
-        if s >= wts_buy and (breakout_ok or mode != "積極"):
-            return "🟢 可買"
-        if s >= watch_th or breakout_ok:
-            return "🟡 觀察"
-        return "⚠️ 漲停勿追"
+        return "🟢 可買"
     # 嚴格追高：非起漲初期仍不給可買
     if chase_risk:
         return "🟡 過熱觀察"
@@ -6476,6 +6471,48 @@ with tab_advanced:
         result=st.session_state.get("single_backtest_res")
         if result:
             render_plain_backtest_summary(result, single_stock_input)
+            # 若完全沒進場，列出區間內每日決策，方便核對弱轉強是否有觸發
+            trades = result.get("trades_detail") or []
+            op = result.get("open_position")
+            if not trades and not op and single_scan_mode == "盤後":
+                with st.expander("🔎 為什麼沒買點？查看每日決策（除錯）", expanded=True):
+                    try:
+                        _dbg_src = prepare_pit_sources(single_stock_input, 1500)
+                        _dbg_d = add_technical_indicators(_dbg_src.get("daily", pd.DataFrame()))
+                        if _dbg_d is None or _dbg_d.empty:
+                            st.caption("無法取得日K，無法列出每日決策。")
+                        else:
+                            _dbg_d = _dbg_d.copy()
+                            _dbg_d["date"] = pd.to_datetime(_dbg_d["date"], errors="coerce")
+                            _mkt = get_yahoo_taiex()
+                            _rows = []
+                            _start = pd.Timestamp(single_start) if single_start else _dbg_d["date"].min()
+                            _end = pd.Timestamp(single_end) if single_end else _dbg_d["date"].max()
+                            for _, _r in _dbg_d.iterrows():
+                                _dt = pd.Timestamp(_r["date"])
+                                if _dt < _start or _dt > _end:
+                                    continue
+                                _reg = market_regime(_dt, _mkt)
+                                _snap = calculate_stock_snapshot(single_stock_input, _dt, _dbg_src, _reg, mode=single_mode)
+                                if not _snap:
+                                    continue
+                                _rows.append({
+                                    "日期": _dt.strftime("%Y-%m-%d"),
+                                    "收盤": _snap.get("現價"),
+                                    "買進分": _snap.get("買進分"),
+                                    "決策": _snap.get("決策"),
+                                    "漲停": _snap.get("漲停狀態"),
+                                    "說明": str(_snap.get("說明", ""))[:40],
+                                })
+                            if _rows:
+                                _dd = pd.DataFrame(_rows)
+                                st.dataframe(_dd, use_container_width=True, hide_index=True)
+                                _n_buy = int((_dd["決策"].astype(str).str.contains("可買")).sum())
+                                st.caption(f"區間內標成可買的日數：{_n_buy}。若這裡有可買但上面仍無進場，請回報（可能是回測進場邏輯問題）。")
+                            else:
+                                st.caption("區間內沒有可計算的快照。")
+                    except Exception as _e:
+                        st.caption(f"除錯列表失敗：{_e}")
             with st.expander("🔬 進階數據（給有經驗的投資人看，一般不用點開）", expanded=False):
                 metric_grid(result); ai_explain(result)
                 bc=st.columns(4)
