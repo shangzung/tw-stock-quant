@@ -5297,7 +5297,7 @@ with tab_help:
   <div class="help-section">
     <div class="help-section-head"><div class="help-num">4</div><div class="help-section-title">每天晚上：深度掃描</div></div>
     <div class="help-body">
-      到「🌙 深度掃描」按「執行盤後深度掃描」。
+      到「🌙 深度掃描」按「🚀 執行積極掃描」。
       系統會從全市場篩出流動性夠的股票，再做基本面／估值／籌碼／技術研究，排出「明天最值得看」的名單。
       <b>簡單說：晚上回答「明天有哪些股票值得我看？」</b>
       （「盤後」指的是用最近一個已收盤日的完整資料，不是限制你只能收盤後才能按。）
@@ -6050,26 +6050,27 @@ with tab_eod:
     if universe_df.empty:
         st.error("無法取得全市場股票清單，可到「⚙️ 系統設定」的 API 診斷檢查原因。")
     else:
-        # 新手預設：全市場 + 標準強度 + 標準（平衡）邏輯；進階才展開
+        # V13.3：主流程固定「積極」——目標是波段雷達，不讓新手在模式間猶豫。
+        # 標準（平衡）仍保留在極進階選項，供研究對照；日常一鍵即積極全市場掃描。
         market_choice = "🌐 全市場"
         strength_choice = list(SCAN_STRENGTH_CONFIG.keys())[1] if len(SCAN_STRENGTH_CONFIG) > 1 else next(iter(SCAN_STRENGTH_CONFIG))
-        eod_mode_choice = MODE_UI_OPTIONS[0]
-        eod_mode = MODE_UI_TO_KEY.get(eod_mode_choice, DEFAULT_MODE)
+        eod_mode = "積極"
         with st.expander("⚙️ 進階選項（一般不用改）", expanded=False):
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
                 market_choice = st.radio("市場", ["🌐 全市場", "🏛️ 僅上市", "🏬 僅上櫃"], horizontal=True, key="eod_market_choice")
             with c2:
                 strength_choice = st.radio("掃描強度", list(SCAN_STRENGTH_CONFIG.keys()), horizontal=True, index=1, key="eod_strength_choice")
-            with c3:
+            with st.expander("🔬 研究用：切換選股邏輯（日常請維持積極）", expanded=False):
                 eod_mode_choice = st.radio(
-                    "選股邏輯",
+                    "選股邏輯（研究對照）",
                     MODE_UI_OPTIONS,
-                    horizontal=True, index=0,
+                    horizontal=True,
+                    index=1,  # 預設積極
                     key="eod_mode_choice",
-                    help="標準較穩；積極較衝。新手建議維持標準。",
+                    help="日常波段雷達請用積極。標準模式僅供研究對照，不建議當主流程。",
                 )
-            eod_mode = MODE_UI_TO_KEY.get(eod_mode_choice, DEFAULT_MODE)
+                eod_mode = MODE_UI_TO_KEY.get(eod_mode_choice, "積極")
         st.session_state["eod_mode"] = eod_mode
 
         _st_cur = get_market_scan_state(eod_mode)
@@ -6093,8 +6094,8 @@ with tab_eod:
         else:
             st.caption(f"（預估約 {est_calls} 次 API；完整分析採批次抓取，Token 消耗比舊版大幅降低。）")
 
-        if st.button("🌙 執行盤後深度掃描", type="primary",
-                     help="任何時間都可以按，包含盤中；「盤後」指用的是最近一個已收盤交易日的完整資料，不是限制執行時間。"):
+        if st.button("🚀 執行積極掃描（全市場波段雷達）", type="primary",
+                     help="固定使用積極邏輯：一鍵掃描全市場 → 依產業整理符合波段條件的標的。任何時間可按；資料為最近已收盤日。"):
             scan_list = build_scan_list(uni, strength_choice)
             pre_rows = []
             with st.status(f"🔎 正在執行市場掃描… 0/{len(scan_list)}", expanded=False) as scan_status:
