@@ -2211,17 +2211,31 @@ def _tw_color(v):
 def style_market_returns(df, columns=None):
     if df is None or df.empty:
         return df
+    # 避免重複欄名（pandas Styler 對 duplicate columns 會 KeyError）
+    if getattr(df.columns, "duplicated", None) is not None and df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()].copy()
     styler = df.style
-    cols = columns or [c for c in df.columns if any(k in str(c) for k in ["漲跌", "報酬", "獲利", "損益"]) and "MDD" not in str(c) and "回撤" not in str(c)]
+    cols = columns or [
+        c for c in df.columns
+        if any(k in str(c) for k in ["漲跌", "報酬", "獲利", "損益", "自訊號以來漲幅"])
+        and "MDD" not in str(c) and "回撤" not in str(c)
+    ]
     for col in cols:
-        if col in df.columns:
-            try:
-                if hasattr(styler, "map"):
-                    styler = styler.map(_tw_color, subset=[col])
-                else:
-                    styler = styler.applymap(_tw_color, subset=[col])
-            except Exception:
-                pass
+        if col not in df.columns:
+            continue
+        # 略過非純量欄（例如 list 的「趨勢」）
+        try:
+            if df[col].dropna().map(lambda x: isinstance(x, (list, tuple, dict))).any():
+                continue
+        except Exception:
+            continue
+        try:
+            if hasattr(styler, "map"):
+                styler = styler.map(_tw_color, subset=[col])
+            else:
+                styler = styler.applymap(_tw_color, subset=[col])
+        except Exception:
+            pass
     return styler
 
 def style_pnl(df):
@@ -5563,11 +5577,51 @@ def scan_column_config():
 
 
 def show_scan_dataframe(df):
-    if df is None or df.empty: return
+    if df is None or df.empty:
+        return
     shown = df.copy()
-    order = [c for c in ["名稱"] + MAIN_TABLE_COLS if c in shown.columns]
-    shown = shown[order]
-    st.dataframe(style_scan_table(shown), use_container_width=True, hide_index=True, column_config=scan_column_config())
+    # 去重欄位順序，避免「名稱」等欄位重複導致 Styler KeyError
+    preferred = ["名稱"] + list(MAIN_TABLE_COLS)
+    seen = set()
+    order = []
+    for c in preferred:
+        if c in shown.columns and c not in seen:
+            order.append(c)
+            seen.add(c)
+    # 其餘欄位不強制帶入，減少 Styler / column_config 衝突
+    if not order:
+        order = [c for c in shown.columns if c not in seen]
+    shown = shown.loc[:, order]
+    # 趨勢欄若是 list，Styler 有時會炸；改成字串摘要或保留給 LineChartColumn
+    if "趨勢" in shown.columns:
+        try:
+            sample = shown["趨勢"].dropna().head(1)
+            if len(sample) and isinstance(sample.iloc[0], (list, tuple)):
+                # Streamlit LineChartColumn 需要 list；不要轉字串。但 pandas Styler 對 list 可能有問題。
+                # 先把趨勢從 styler 用的 frame 拿掉，用純值 frame 上色，再把趨勢併回顯示。
+                trend_series = shown["趨勢"]
+                shown_style = shown.drop(columns=["趨勢"])
+                styled = style_scan_table(shown_style)
+                # 顯示時把趨勢加回去：用原始 shown（含趨勢）+ column_config
+                st.dataframe(
+                    shown,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=scan_column_config(),
+                )
+                return
+        except Exception:
+            pass
+    try:
+        st.dataframe(
+            style_scan_table(shown),
+            use_container_width=True,
+            hide_index=True,
+            column_config=scan_column_config(),
+        )
+    except Exception:
+        # 最後保底：不上色也能看表
+        st.dataframe(shown, use_container_width=True, hide_index=True, column_config=scan_column_config())
 
 MAIN_TABLE_COLS = [
     "股票代碼", "名稱", "所屬產業", "訊號日期", "買進分", "決策",
