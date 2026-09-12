@@ -6377,7 +6377,10 @@ with tab_advanced:
 
     with sub_single:
         st.subheader("📉 單股研究級回測")
-        st.caption("輸入股票代碼＋起訖日期＋想測試的積極程度，直接看這段區間會不會抓到訊號、什麼時候進場。進場判斷固定用『當日反應』引擎（跳空＋爆量＋收盤位置），抓訊號比較快。")
+        st.caption(
+            "預設與「🌙 深度掃描／盤後」同一套進場邏輯：當日收盤算出買進分，決策＝🟢 可買時，"
+            "隔一交易日開盤進場；出場用 ATR 停損／停利與持有天數。也可改選「盤中反應」做對照。"
+        )
         sc1, sc2, sc3 = st.columns([1.2, 1, 1])
         with sc1:
             single_stock_input = st.text_input("股票", value=(stocks[0] if stocks else "5351"), key="single_bt_stock").strip()
@@ -6385,16 +6388,21 @@ with tab_advanced:
             single_start = st.date_input("開始日期", value=(datetime.now() - timedelta(days=90)).date(), key="single_bt_start")
         with sc3:
             single_end = st.date_input("結束日期", value=datetime.now().date(), key="single_bt_end")
-        single_scan_mode = "盤中"
+        single_scan_choice = st.radio(
+            "進場引擎",
+            ["盤後（與深度掃描同一套買進分）", "盤中（當日反應：跳空＋爆量＋收盤位置）"],
+            horizontal=True, index=0, key="single_bt_scan_mode",
+            help="盤後＝calculate_stock_snapshot 決策為🟢可買才進場，較嚴、訊號較少；盤中＝反應分達門檻即進場，較快也較易誤觸。",
+        )
+        single_scan_mode = "盤後" if single_scan_choice.startswith("盤後") else "盤中"
         single_mode_choice = st.radio(
             "選股邏輯", MODE_UI_OPTIONS, horizontal=True, index=0, key="single_bt_mode",
             help="標準＝趨勢穩健技術分析；積極＝突破／爆量／資金集中的飆股邏輯。",
         )
         single_mode = MODE_UI_TO_KEY.get(single_mode_choice, DEFAULT_MODE)
         if single_stock_input and st.button("▶️ 執行單股回測", type="primary"):
-            with st.status(f"📉 {single_stock_input}（{single_mode}）Point-in-Time 回測中…", expanded=False):
+            with st.status(f"📉 {single_stock_input}（{single_scan_mode}·{single_mode}）Point-in-Time 回測中…", expanded=False):
                 st.session_state["single_backtest_res"] = backtest_single(
-
                     single_stock_input, initial_capital, fee, tax, slippage,
                     start_date=single_start, end_date=single_end, mode=single_mode, scan_mode=single_scan_mode)
         result=st.session_state.get("single_backtest_res")
@@ -6416,7 +6424,8 @@ with tab_advanced:
                         td["exit_date"] = pd.to_datetime(td["exit_date"]).dt.strftime("%Y-%m-%d")
                         td["報酬(%)"] = ((td["exit"]/td["entry"]-1)*100).round(2)
                     st.dataframe(td, use_container_width=True, hide_index=True)
-                st.write("🧠 這個策略不是單看技術訊號，而是用目前系統的買進分／當日反應分與市場位階做歷史判斷；每個歷史日只使用當日以前的資料。")
+                st.write("🧠 盤後模式：與深度掃描相同，用買進分＋市場位階，決策為🟢可買才隔日進場。"
+                         "盤中模式：用當日反應分（跳空／爆量／收盤位置）。每個歷史日只使用當日以前的資料（Point-in-Time）。")
 
     with sub_compare:
         st.subheader("📊 策略比較報表")
