@@ -1576,13 +1576,13 @@ def detect_chase_risk(ret20, rsi, distance_20_high, day_change_pct=None, rs_exce
 
 
 def is_weak_to_strong_reversal(daily, day_change_pct):
-    """通用：前一日偏弱／低點區，當日強勢大漲或漲停 → 弱轉強起漲型態。
-    用於避免「探底後隔日漲停」被漲停硬規則整段抹掉（全市場適用，非單一股票特例）。
+    """通用：探底／急殺後的強勢起漲（含隔日漲停、起漲後連續強勢日）。
+    全市場適用。目的：讓「殺低後轉強」能產生隔日可執行訊號，而非整段被漲停規則抹掉。
     """
     day_pct = safe_float(day_change_pct, 0)
     if day_pct < 9.0:
         return False
-    if daily is None or getattr(daily, "empty", True) or len(daily) < 4:
+    if daily is None or getattr(daily, "empty", True) or len(daily) < 6:
         return False
     try:
         prev = daily.iloc[-2]
@@ -1591,15 +1591,32 @@ def is_weak_to_strong_reversal(daily, day_change_pct):
         prev2_c = safe_float(prev2.get("close"))
         prev_day_pct = (prev_c / prev2_c - 1) * 100 if (prev2_c and prev2_c > 0 and not pd.isna(prev_c)) else np.nan
         prev_weak = (not pd.isna(prev_day_pct) and prev_day_pct <= -2.0)
-        # 前收在近 5 日低點區（含當日前）
-        recent = daily.iloc[-6:-1] if len(daily) >= 6 else daily.iloc[:-1]
+
+        recent = daily.iloc[-6:-1]
         low_col = "min" if "min" in recent.columns else ("low" if "low" in recent.columns else None)
         near_low = False
         if low_col and not pd.isna(prev_c):
             rlow = pd.to_numeric(recent[low_col], errors="coerce").min()
             if not pd.isna(rlow) and rlow > 0 and prev_c <= rlow * 1.03:
                 near_low = True
-        return bool(prev_weak or near_low)
+
+        # 近 5 日內有急殺（<= -5%），且 20 日波段漲幅仍不高 → 起漲初期連續強勢日
+        early_recovery = False
+        closes = pd.to_numeric(daily["close"], errors="coerce")
+        if len(closes) >= 6:
+            rets = closes.pct_change()
+            washout = bool((rets.iloc[-6:-1] <= -0.05).any())
+            ret20 = safe_float(daily.iloc[-1].get("RET_20"), 0)
+            if pd.isna(ret20):
+                try:
+                    ret20 = float(closes.iloc[-1] / closes.iloc[-21] - 1) if len(closes) >= 21 else 0.0
+                except Exception:
+                    ret20 = 0.0
+            # 波段尚未大漲（<12%）才算起漲初期，避免主升後段追價
+            if washout and ret20 < 0.12 and day_pct >= 9.0:
+                early_recovery = True
+
+        return bool(prev_weak or near_low or early_recovery)
     except Exception:
         return False
 
@@ -1615,16 +1632,22 @@ def decision_label(score, overheat=False, limit_up=False, market_regime="UNKNOWN
     mode = normalize_mode(mode)
     buy_th = mp["eod_buy_threshold"] + safe_float(threshold_adj, 0)
     watch_th = mp["eod_watch_threshold"] + max(0, safe_float(threshold_adj, 0) * 0.5)
-    # 漲停：預設勿追；但「弱轉強起漲」允許產生隔日可執行訊號（不在當日追價）
+    # 漲停：預設勿追；但「弱轉強／起漲初期」允許隔日可執行訊號（不追當日漲停價）
     if limit_up and not weak_to_strong:
         return "⚠️ 漲停勿追"
-    if limit_up and weak_to_strong and (overheat or (chase_risk and safe_float(score, 0) < buy_th)):
-        # 已是波段過熱的漲停仍擋；起漲初期則往下走正常門檻
-        if overheat:
-            return "🟡 過熱觀察"
-    # 嚴格過熱或追高風險：一律不給可買（賺錢第一原則：不買在倒貨前）
-    # 弱轉強漲停日：若非 hard 過熱，允許用分數門檻決定可買／觀察
-    if overheat or (chase_risk and not (limit_up and weak_to_strong)):
+    if overheat:
+        return "🟡 過熱觀察"
+    # 起漲初期漲停：用較寬的可買門檻（約觀察線+8），避免探底反擊時分數被技術面拖太低而整段 0 訊號
+    if limit_up and weak_to_strong:
+        s = safe_float(score, 0)
+        wts_buy = min(buy_th, watch_th + 8)  # 積極約 63；標準約 76
+        if s >= wts_buy and (breakout_ok or mode != "積極"):
+            return "🟢 可買"
+        if s >= watch_th or breakout_ok:
+            return "🟡 觀察"
+        return "⚠️ 漲停勿追"
+    # 嚴格追高：非起漲初期仍不給可買
+    if chase_risk:
         return "🟡 過熱觀察"
     if market_regime == "BEAR" and score < buy_th - 3:
         return "🔴 不買"
@@ -3814,10 +3837,13 @@ def calculate_stock_snapshot(stock_id, as_of_date, sources, regime_dict, mode=DE
         limit_status = limit_up_status(price, prev_close, safe_float(x.get("max")), safe_float(x.get("min")), day_change_pct)
         th_adj, th_note = calibration_threshold_adjust(mode)
         weak_to_strong = is_weak_to_strong_reversal(daily, day_change_pct)
-        # 弱轉強＋漲停：鎖停量縮不應否決積極突破（breakthrough 函式已處理；此處再保險）
+        # 弱轉強／起漲初期＋漲停：不因鎖停量縮或尚未站上均線否決突破
         if weak_to_strong and limit_status.startswith("🔒") and mode == "積極" and not breakout_ok:
             breakout_ok = True
             conf_reasons = list(conf_reasons or []) + ["弱轉強漲停"]
+        # 小幅拉抬起漲分，避免急殺後技術面過低導致永遠到不了可買
+        if weak_to_strong and limit_status.startswith("🔒"):
+            buy_score = clamp(buy_score + (8 if mode == "積極" else 5))
         decision = decision_label(
             buy_score, overheat=overheat, limit_up=limit_status.startswith("🔒"),
             market_regime=regime_dict["regime"], mode=mode,
