@@ -1,17 +1,14 @@
 # app.py
-# 台股 Quant Compass V13.3.2：趨勢波段放寬（慢牛）+ 產業雷達 + 路徑一致性 + 積極掃描
+# 台股 Quant Compass V13.3.3：盤後掃描時段鎖定 + 資料齊備檢查 + 名單覆核對照
 # ------------------------------------------------------------
 # 修正說明（繼承 V13.0 全部內容）：
 # 1–9. 同 V13.0（參數凍結、下市股宇宙、顯著性門檻、前瞻盲測優先…）
-# 10. V13.1（實盤可用性與可驗證 edge）：
-#    - AI戰績升級為活體儀表板：自動狀態卡（STABLE/WATCH/DRIFT）、明確行動建議
-#    - 新增 ATR 風險預算部位建議（suggest_position_size）+ regime 曝險乘數
-#    - 決策與卡片顯示建議倉位與風險預算，方便直接執行
-#    - 漲停／接近漲停執行現實性加嚴（可買降級）
-#    - 庫存健康新增組合層級摘要（總曝險、集中度、平均信心）
-#    - 首頁／驗證頁強化 drift 警示，避免忽略失效訊號
-#    - 成本與滑價假設在建議中更一致呈現
-#    核心 STRATEGY_MODES 仍凍結；真正 edge 只認 AI戰績累積的真實前瞻。
+# 10. V13.1（實盤可用性與可驗證 edge）…
+# 11. V13.3.3（名單一致性與可追溯）：
+#    - 建議盤後掃描時段 21:30～隔日 08:30；時段內標「官方盤後」、其餘標「覆核」
+#    - 掃描結果記錄日K／法人等資料截止日，未齊備時明確警告
+#    - 重掃時保留上一份可買名單，顯示「新增／消失／分數變化」對照（解決 3029 類問題）
+#    - 官方名單不因非建議時段覆核而默默消失，覆核差異另區顯示
 # ------------------------------------------------------------
 
 import time
@@ -380,6 +377,209 @@ def clear_saved_scan(mode=None):
         return True
     except Exception:
         return False
+
+
+# =========================
+# V13.3.3：盤後掃描時段／資料齊備／名單覆核對照
+# =========================
+def eod_scan_timing_advice():
+    """回傳目前是否落在「建議盤後掃描時段」與對應角色說明。
+    建議窗：交易日 21:30～隔日 08:30（法人約 20:00、融資約 21:00 後較齊）。
+    """
+    from datetime import time as _dtime
+    now = now_tw()
+    t = now.time()
+    wd = now.weekday()  # 0=Mon … 6=Sun
+    if wd >= 5:
+        return {
+            "in_window": False,
+            "role": "weekend",
+            "label": "週末",
+            "message": "今日非交易日。請使用最近一個交易日 21:30 後的官方盤後掃描結果；週末重掃僅供覆核。",
+        }
+    if t >= _dtime(21, 30) or t <= _dtime(8, 30):
+        return {
+            "in_window": True,
+            "role": "official",
+            "label": "官方盤後",
+            "message": "目前在建議盤後掃描時段（21:30～隔日 08:30）。此結果適合作為「明日可買」主訊號。",
+        }
+    if t > _dtime(13, 30):
+        return {
+            "in_window": False,
+            "role": "early_eod",
+            "label": "資料可能未齊",
+            "message": "收盤後資料仍在陸續更新（日K約 17:30、法人約 20:00、融資約 21:00）。"
+                       "此時掃描僅供參考，建議 21:30 後再掃一次作為官方名單。",
+        }
+    return {
+        "in_window": False,
+        "role": "intraday_or_preopen",
+        "label": "覆核",
+        "message": "目前非建議盤後時段。深度掃描仍使用最近已收盤日資料；"
+                   "若與昨晚官方名單不同，請以「覆核對照」區理解差異，勿當作兩套互相矛盾的規則。",
+    }
+
+
+def _max_date_from_sources(batch_sources, dataset_key="daily", sample_n=12):
+    """從 batch sources 抽樣推估某 dataset 的最新日期字串 YYYY-MM-DD。"""
+    if not batch_sources:
+        return None
+    dates = []
+    for i, (sid, src) in enumerate(batch_sources.items()):
+        if i >= sample_n:
+            break
+        df = (src or {}).get(dataset_key)
+        if df is None or getattr(df, "empty", True) or "date" not in getattr(df, "columns", []):
+            continue
+        try:
+            d = pd.to_datetime(df["date"], errors="coerce").max()
+            if pd.notna(d):
+                dates.append(pd.Timestamp(d).normalize())
+        except Exception:
+            continue
+    if not dates:
+        return None
+    return max(dates).strftime("%Y-%m-%d")
+
+
+def assess_eod_data_readiness(batch_sources=None):
+    """依批次資料推估日K／法人是否已對齊最近交易日；回傳狀態 dict。"""
+    daily_asof = _max_date_from_sources(batch_sources, "daily")
+    inst_asof = _max_date_from_sources(batch_sources, "institutional")
+    per_asof = _max_date_from_sources(batch_sources, "per_pbr")
+    ready = True
+    notes = []
+    if not daily_asof:
+        ready = False
+        notes.append("日K日期無法確認（資料可能抓取失敗）")
+    if daily_asof and inst_asof and inst_asof < daily_asof:
+        ready = False
+        notes.append(f"法人資料截止 {inst_asof}，晚於日K {daily_asof}（籌碼可能尚未更新）")
+    elif daily_asof and not inst_asof:
+        notes.append("法人資料抽樣為空，籌碼分數可能偏保守")
+    if daily_asof and per_asof and per_asof < daily_asof:
+        notes.append(f"PER/PBR 截止 {per_asof}，可能尚未更新到日K日")
+    if ready and not notes:
+        notes.append("日K與法人抽樣日期一致，資料大致齊備")
+    return {
+        "ready": ready,
+        "daily_asof": daily_asof,
+        "institutional_asof": inst_asof,
+        "per_pbr_asof": per_asof,
+        "notes": notes,
+        "summary": "；".join(notes) if notes else "—",
+    }
+
+
+def _candidate_codes_from_payload(payload):
+    if not payload:
+        return set()
+    cands = payload.get("candidates")
+    if cands is None or getattr(cands, "empty", True):
+        out = payload.get("out")
+        if out is None or getattr(out, "empty", True) or "決策" not in getattr(out, "columns", []):
+            return set()
+        cands = out[out["決策"].astype(str).str.contains("可買", na=False)]
+    if cands is None or getattr(cands, "empty", True):
+        return set()
+    return set(cands["股票代碼"].astype(str).str.strip().tolist())
+
+
+def _score_map_from_df(df):
+    if df is None or getattr(df, "empty", True) or "股票代碼" not in getattr(df, "columns", []):
+        return {}
+    m = {}
+    for _, r in df.iterrows():
+        sid = str(r.get("股票代碼", "")).strip()
+        if sid:
+            m[sid] = safe_float(r.get("買進分"), np.nan)
+    return m
+
+
+def compare_buy_lists(prev_payload, new_out, new_candidates):
+    """比較上一份掃描與本次的可買名單，回傳新增／消失／分數變化。"""
+    prev_codes = _candidate_codes_from_payload(prev_payload)
+    if new_candidates is not None and not getattr(new_candidates, "empty", True):
+        new_codes = set(new_candidates["股票代碼"].astype(str).str.strip().tolist())
+    else:
+        new_codes = set()
+    added = sorted(new_codes - prev_codes)
+    removed = sorted(prev_codes - new_codes)
+    prev_out = (prev_payload or {}).get("out")
+    prev_scores = _score_map_from_df(prev_out)
+    new_scores = _score_map_from_df(new_out)
+    score_changes = []
+    for sid in sorted(prev_codes & new_codes):
+        a, b = prev_scores.get(sid), new_scores.get(sid)
+        if pd.isna(a) or pd.isna(b):
+            continue
+        if abs(b - a) >= 1.0:
+            score_changes.append({"股票代碼": sid, "上次買進分": round(a, 1), "本次買進分": round(b, 1), "變化": round(b - a, 1)})
+    removed_detail = []
+    if prev_out is not None and not getattr(prev_out, "empty", True) and removed:
+        for sid in removed:
+            rows = prev_out[prev_out["股票代碼"].astype(str) == sid]
+            if rows.empty:
+                removed_detail.append({"股票代碼": sid, "上次買進分": None, "上次決策": "🟢 可買"})
+            else:
+                r = rows.iloc[0]
+                removed_detail.append({
+                    "股票代碼": sid,
+                    "名稱": r.get("名稱", ""),
+                    "上次買進分": safe_float(r.get("買進分")),
+                    "上次決策": r.get("決策", "🟢 可買"),
+                    "說明": str(r.get("說明", ""))[:60],
+                })
+    added_detail = []
+    if new_out is not None and not getattr(new_out, "empty", True) and added:
+        for sid in added:
+            rows = new_out[new_out["股票代碼"].astype(str) == sid]
+            if rows.empty:
+                added_detail.append({"股票代碼": sid})
+            else:
+                r = rows.iloc[0]
+                added_detail.append({
+                    "股票代碼": sid,
+                    "名稱": r.get("名稱", ""),
+                    "本次買進分": safe_float(r.get("買進分")),
+                    "決策": r.get("決策", ""),
+                })
+    return {
+        "added": added,
+        "removed": removed,
+        "added_detail": added_detail,
+        "removed_detail": removed_detail,
+        "score_changes": score_changes,
+        "prev_saved_at": (prev_payload or {}).get("saved_at"),
+        "prev_role": (prev_payload or {}).get("scan_role"),
+    }
+
+
+def render_scan_diff_panel(diff):
+    """在畫面上呈現可買名單對照。"""
+    if not diff:
+        return
+    prev_at = diff.get("prev_saved_at") or "（無上一筆）"
+    st.markdown("### 🔄 與上次掃描對照（可買名單）")
+    st.caption(
+        f"上次掃描時間：{prev_at}"
+        + (f" · 角色：{diff.get('prev_role') or '—'}" if diff.get("prev_role") else "")
+        + "。名單變化通常來自資料更新（法人／融資定案）或分數落在門檻邊界，不是另一套選股規則。"
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("本次新增可買", len(diff.get("added") or []))
+    c2.metric("本次消失可買", len(diff.get("removed") or []))
+    c3.metric("仍在榜分數變化≥1", len(diff.get("score_changes") or []))
+    if diff.get("removed_detail"):
+        st.warning("以下股票上次為可買、本次未再列入（例如資料更新後未達門檻，或未進入完整分析 shortlist）：")
+        st.dataframe(pd.DataFrame(diff["removed_detail"]), use_container_width=True, hide_index=True)
+    if diff.get("added_detail"):
+        st.success("以下為本次新進入可買：")
+        st.dataframe(pd.DataFrame(diff["added_detail"]), use_container_width=True, hide_index=True)
+    if diff.get("score_changes"):
+        with st.expander("仍在可買榜、買進分有變化", expanded=False):
+            st.dataframe(pd.DataFrame(diff["score_changes"]), use_container_width=True, hide_index=True)
 
 
 def load_hot_stock_scan_all():
@@ -1113,8 +1313,8 @@ md_html("""
   <div class="brand-block">
     <div class="brand-mark">✦</div>
     <div>
-      <div class="brand-title">QUANT COMPASS <span>V13.1</span></div>
-      <div class="brand-sub">驗證紀律 · 部位建議 · 活體 AI戰績 · 台股量化決策終端</div>
+      <div class="brand-title">QUANT COMPASS <span>V13.3.3</span></div>
+      <div class="brand-sub">盤後時段鎖定 · 資料齊備檢查 · 名單覆核對照 · 台股量化決策終端</div>
     </div>
   </div>
   <div class="header-status">
@@ -6118,10 +6318,19 @@ with tab_eod:
 </div>
 """)
     st.info(
-        "新手只要做一件事：按下面「執行盤後深度掃描」→ 看「明日可買」。"
-        "不用懂標準／積極、盤中／盤後。系統預設用較穩的標準邏輯。"
+        "新手只要做一件事：按下面「執行積極掃描」→ 看「明日可買」。"
+        "建議在 **21:30～隔日 08:30** 掃描，名單才較接近定案資料。"
     )
-    st.caption("用最近一個已收盤日的完整資料做研究，找出條件較完整的股票。分數不是勝率、也不是保證賺錢。")
+    st.caption("用最近一個已收盤日的完整資料做研究。分數不是勝率、也不是保證賺錢。"
+               "同一檔股票在不同時間進出名單，多半是資料更新（法人／融資）或分數落在門檻邊界，不是規則隨機改變。")
+
+    _timing = eod_scan_timing_advice()
+    if _timing.get("in_window"):
+        st.success(f"✅ 掃描時段：{_timing.get('label')} — {_timing.get('message')}")
+    elif _timing.get("role") == "early_eod":
+        st.warning(f"⚠️ 掃描時段：{_timing.get('label')} — {_timing.get('message')}")
+    else:
+        st.info(f"ℹ️ 掃描時段：{_timing.get('label')} — {_timing.get('message')}")
 
     universe_df = get_stock_universe()
     if universe_df.empty:
@@ -6172,7 +6381,7 @@ with tab_eod:
             st.caption(f"（預估約 {est_calls} 次 API；完整分析採批次抓取，Token 消耗比舊版大幅降低。）")
 
         if st.button("🚀 執行積極掃描（全市場波段雷達）", type="primary",
-                     help="固定使用積極邏輯：一鍵掃描全市場 → 依產業整理符合波段條件的標的。任何時間可按；資料為最近已收盤日。"):
+                     help="固定使用積極邏輯：一鍵掃描全市場。建議 21:30～隔日 08:30 執行（官方盤後）；其他時段為覆核，會與上次可買名單對照。"):
             scan_list = build_scan_list(uni, strength_choice)
             pre_rows = []
             with st.status(f"🔎 正在執行市場掃描… 0/{len(scan_list)}", expanded=False) as scan_status:
@@ -6252,14 +6461,44 @@ with tab_eod:
                             research_log=_log_for_enrich if _log_for_enrich is not None and not _log_for_enrich.empty else None,
                         )
                         candidates = out[out["決策"].astype(str).str.contains("可買", na=False)].copy()
-                        _payload = {"out": out, "candidates": candidates, "top5": out.head(5), "saved_at": _saved_at}
+                        # V13.3.3：時段角色、資料齊備、與上一份名單對照
+                        _timing_now = eod_scan_timing_advice()
+                        _data_ready = assess_eod_data_readiness(batch_sources)
+                        _prev_payload = get_market_scan_state(eod_mode)
+                        _official_keep = None
+                        if _prev_payload and _prev_payload.get("scan_role") == "官方盤後":
+                            _official_keep = {
+                                "saved_at": _prev_payload.get("saved_at"),
+                                "candidates": _prev_payload.get("candidates"),
+                                "out": _prev_payload.get("out"),
+                                "data_readiness": _prev_payload.get("data_readiness"),
+                            }
+                        elif _prev_payload and _prev_payload.get("official_snapshot"):
+                            _official_keep = _prev_payload.get("official_snapshot")
+                        _diff = compare_buy_lists(_prev_payload, out, candidates) if _prev_payload else None
+                        _scan_role = "官方盤後" if _timing_now.get("in_window") else "覆核"
+                        if _scan_role == "官方盤後" and _data_ready.get("ready", False):
+                            _official_keep = {
+                                "saved_at": _saved_at,
+                                "candidates": candidates,
+                                "out": out,
+                                "data_readiness": _data_ready,
+                            }
+                        _payload = {
+                            "out": out,
+                            "candidates": candidates,
+                            "top5": out.head(5),
+                            "saved_at": _saved_at,
+                            "scan_role": _scan_role,
+                            "timing": _timing_now,
+                            "data_readiness": _data_ready,
+                            "diff_vs_prev": _diff,
+                            "official_snapshot": _official_keep,
+                            "mode": eod_mode,
+                        }
 
-                        # 依模式（穩健／積極）分開存進 session state，兩邊互不覆蓋——
-                        # 切換上面的「盤後策略模式」就能各自查看，不用重新掃描。
                         st.session_state["market_scan_by_mode"] = dict(st.session_state.get("market_scan_by_mode") or {})
                         st.session_state["market_scan_by_mode"][eod_mode] = _payload
-                        # 存到本機檔案：就算關掉 App 或重開機，這份結果也會留著，
-                        # 直到你下一次用同一個模式按「執行盤後深度掃描」才會被覆蓋掉。
                         save_scan_to_disk(eod_mode, _payload)
                         append_research_snapshot(out, _saved_at, regime.get("regime"), regime.get("score"))
                     else:
@@ -6271,8 +6510,32 @@ with tab_eod:
         if _cur_scan is not None:
             out_df = _cur_scan.get("out")
             _saved_at = _cur_scan.get("saved_at")
+            _role = _cur_scan.get("scan_role") or "—"
+            _ready = _cur_scan.get("data_readiness") or {}
             if _saved_at:
-                st.caption(f"🕓 掃描時間：{_saved_at}（重開 App 也不會消失，再按一次掃描才會更新）")
+                st.caption(
+                    f"🕓 掃描時間：{_saved_at}　｜　角色：**{_role}**"
+                    f"（重開 App 也不會消失；再按掃描會更新本次結果，並與上次可買名單對照）"
+                )
+            if _ready:
+                _rd_msg = _ready.get("summary") or ""
+                _d0 = _ready.get("daily_asof") or "—"
+                _i0 = _ready.get("institutional_asof") or "—"
+                if _ready.get("ready"):
+                    st.caption(f"📎 資料截止：日K {_d0} · 法人 {_i0} — {_rd_msg}")
+                else:
+                    st.warning(f"📎 資料可能未齊：日K {_d0} · 法人 {_i0} — {_rd_msg}")
+            _stored_diff = _cur_scan.get("diff_vs_prev")
+            if _stored_diff and (_stored_diff.get("removed") or _stored_diff.get("added") or _stored_diff.get("score_changes")):
+                render_scan_diff_panel(_stored_diff)
+            _off = _cur_scan.get("official_snapshot")
+            if _role == "覆核" and _off and _off.get("saved_at"):
+                _off_c = _off.get("candidates")
+                _off_n = 0 if _off_c is None or getattr(_off_c, "empty", True) else len(_off_c)
+                st.info(
+                    f"📌 官方盤後快照仍保留（掃描於 {_off.get('saved_at')}，當時可買 {_off_n} 檔）。"
+                    "覆核結果若不同，請以「對照」區理解；執行面建議：資料已齊備的官方或本次覆核擇一，不要混用兩套名單當不同策略。"
+                )
 
             # 若舊快取沒有產業欄，即時補齊（不重跑掃描）
             if out_df is not None and not out_df.empty and "所屬產業" not in out_df.columns:
@@ -7263,4 +7526,4 @@ with tab_advanced:
 
 # footer
 st.divider()
-st.caption("台股量化羅盤 Quant Compass V13.3.2 · 趨勢波段放寬 · 產業雷達 · 積極掃描 · 路徑一致性 · 研究輔助非投資建議")
+st.caption("台股量化羅盤 Quant Compass V13.3.3 · 盤後時段鎖定 · 資料齊備檢查 · 名單覆核對照 · 研究輔助非投資建議")
